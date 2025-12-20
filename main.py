@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from typing import List, Optional
 import os
 import uuid
@@ -8,14 +9,28 @@ import stripe
 app = FastAPI(title="Receipts API")
 
 # -------------------------
-# CORS (so CodeSandbox / browsers can fetch this API)
+# CORS (for CodeSandbox / browsers)
 # -------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # demo: allow any origin
+    allow_origins=["*"],          # demo: allow any origin
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Extra: force CORS header on ALL responses (belt + suspenders)
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    # Handle preflight explicitly
+    if request.method == "OPTIONS":
+        resp = JSONResponse({"ok": True})
+    else:
+        resp = await call_next(request)
+
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "*"
+    return resp
 
 # -------------------------
 # In-memory storage (NO DB)
@@ -46,15 +61,10 @@ async def stripe_webhook(request: Request):
         return {"ok": True, "ignored": True}
 
     session = event["data"]["object"]
-
-    # If you don't send client_reference_id, we default it (demo-friendly)
     user_id = session.get("client_reference_id") or "demo_user"
 
     # Pull itemized line items from Stripe
-    try:
-        line_items = stripe.checkout.Session.list_line_items(session["id"])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch line items: {e}")
+    line_items = stripe.checkout.Session.list_line_items(session["id"])
 
     items = []
     for li in line_items.data:
