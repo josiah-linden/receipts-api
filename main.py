@@ -1,9 +1,21 @@
 from fastapi import FastAPI, Request, HTTPException
-from typing import Dict, List
-import os, uuid
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional
+import os
+import uuid
 import stripe
 
 app = FastAPI(title="Receipts API")
+
+# -------------------------
+# CORS (so CodeSandbox / browsers can fetch this API)
+# -------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # demo: allow any origin
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------------------------
 # In-memory storage (NO DB)
@@ -18,7 +30,6 @@ if not STRIPE_SECRET_KEY:
     print("WARNING: STRIPE_SECRET_KEY not set")
 
 stripe.api_key = STRIPE_SECRET_KEY
-
 
 # -------------------------
 # Stripe Webhook
@@ -36,19 +47,25 @@ async def stripe_webhook(request: Request):
 
     session = event["data"]["object"]
 
-    user_id = session.get("client_reference_id", "demo_user")
+    # If you don't send client_reference_id, we default it (demo-friendly)
+    user_id = session.get("client_reference_id") or "demo_user"
 
     # Pull itemized line items from Stripe
-    line_items = stripe.checkout.Session.list_line_items(session["id"])
+    try:
+        line_items = stripe.checkout.Session.list_line_items(session["id"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch line items: {e}")
 
     items = []
     for li in line_items.data:
-        items.append({
-            "sku": li.price.product if li.price else None,
-            "name": li.description,
-            "quantity": li.quantity,
-            "unit_price": (li.price.unit_amount or 0) / 100,
-        })
+        items.append(
+            {
+                "sku": li.price.product if li.price else None,
+                "name": li.description,
+                "quantity": li.quantity,
+                "unit_price": ((li.price.unit_amount or 0) / 100) if li.price else 0,
+            }
+        )
 
     transaction = {
         "id": str(uuid.uuid4()),
@@ -56,25 +73,22 @@ async def stripe_webhook(request: Request):
         "merchant": "stripe",
         "payment_id": session.get("payment_intent"),
         "timestamp": session.get("created"),
-        "currency": session.get("currency", "usd").upper(),
+        "currency": (session.get("currency") or "usd").upper(),
         "total": (session.get("amount_total") or 0) / 100,
         "items": items,
     }
 
     transactions.append(transaction)
-
     return {"ok": True}
-
 
 # -------------------------
 # API your app calls
 # -------------------------
 @app.get("/api/transactions")
-def get_transactions(user_id: str | None = None):
+def get_transactions(user_id: Optional[str] = None):
     if user_id:
-        return [t for t in transactions if t["user_id"] == user_id]
+        return [t for t in transactions if t.get("user_id") == user_id]
     return transactions
-
 
 # -------------------------
 # Health check
@@ -82,4 +96,3 @@ def get_transactions(user_id: str | None = None):
 @app.get("/")
 def health():
     return {"status": "ok"}
-
