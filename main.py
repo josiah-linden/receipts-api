@@ -41,6 +41,9 @@ async def add_cors_headers(request: Request, call_next):
 # -------------------------
 transactions: List[dict] = []
 
+# Dedupe storage for webhook events (in-memory)
+processed_square_event_ids: set[str] = set()
+
 # -------------------------
 # Stripe setup
 # -------------------------
@@ -53,10 +56,10 @@ stripe.api_key = STRIPE_SECRET_KEY
 # -------------------------
 # Square setup (webhooks)
 # -------------------------
-# In Square Developer Dashboard -> Webhooks, you'll see a "Webhook Signature Key"
+# Optional: verify Square webhook signature
 SQUARE_WEBHOOK_SIGNATURE_KEY = os.getenv("SQUARE_WEBHOOK_SIGNATURE_KEY")
 if not SQUARE_WEBHOOK_SIGNATURE_KEY:
-    print("WARNING: SQUARE_WEBHOOK_SIGNATURE_KEY not set (Square webhooks will be accepted without verification)")
+    print("WARNING: SQUARE_WEBHOOK_SIGNATURE_KEY not set (Square webhooks will NOT be verified)")
 
 def _square_expected_signature(signature_key: str, notification_url: str, body_bytes: bytes) -> str:
     """
@@ -69,7 +72,7 @@ def _square_expected_signature(signature_key: str, notification_url: str, body_b
 def _request_public_url(request: Request) -> str:
     """
     Build the exact public URL Square posted to.
-    NOTE: If you're behind a proxy, we prefer X-Forwarded-* headers.
+    Prefer X-Forwarded-* headers if behind proxy (Render).
     """
     headers = request.headers
     proto = headers.get("x-forwarded-proto") or request.url.scheme
@@ -124,76 +127,133 @@ async def stripe_webhook(request: Request):
     return {"ok": True}
 
 # -------------------------
-# Square Webhook (NEW) - does NOT affect existing API
-# URL you saved in Square: https://receipts-api-9owj.onrender.com/api/webhooks/square
+# Square Webhook (FIXED)
+# - Dedupe by event_id
+# - Only create receipts from order.created (has the real line items)
+# - Ignore noisy updated events for now to prevent duplicates
 # -------------------------
 @app.post("/api/webhooks/square")
 async def square_webhook(request: Request):
-    # Read raw body (needed for signature verification + logging)
     body_bytes = await request.body()
 
-    # Parse JSON if possible (Square sends JSON)
+    # Parse JSON
     try:
         payload = await request.json()
     except Exception:
         payload = None
 
-    # Verify signature if key is set
+    # Verify signature if configured
     if SQUARE_WEBHOOK_SIGNATURE_KEY:
         notification_url = _request_public_url(request)
         expected = _square_expected_signature(SQUARE_WEBHOOK_SIGNATURE_KEY, notification_url, body_bytes)
         provided = request.headers.get("x-square-hmacsha1-signature") or ""
-
         if not hmac.compare_digest(expected, provided):
-            # For now, reject invalid signatures (this is important in production)
             raise HTTPException(status_code=401, detail="Invalid Square webhook signature")
 
-    # Log receipt (so you can confirm it's working in Render logs)
-    event_type = payload.get("type") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        # Always return 200 so Square doesn't retry forever
+        print("⚠️ Square webhook: non-JSON payload")
+        return {"ok": True}
+
+    event_type = payload.get("type")
+    event_id = payload.get("event_id")
+
     print("✅ Square webhook received")
     print("Type:", event_type)
-    # Don’t spam logs with giant payloads—just show keys
-    if isinstance(payload, dict):
-        print("Payload keys:", list(payload.keys()))
-    else:
-        print("Raw body length:", len(body_bytes or b""))
+    print("Payload keys:", list(payload.keys()))
 
-    # Demo behavior: optionally convert Square event -> a transaction record your app can display.
-    # We'll keep this minimal to avoid breaking anything; we only append when we have enough data.
-    if isinstance(payload, dict):
-        data = payload.get("data") or {}
-        obj = data.get("object") or {}
+    # Dedupe retries / multi-delivery
+    if event_id and event_id in processed_square_event_ids:
+        print("↩️ Duplicate Square event_id ignored:", event_id)
+        return {"ok": True, "deduped": True}
+    if event_id:
+        processed_square_event_ids.add(event_id)
 
-        # Try to capture a payment if present
-        square_payment = obj.get("payment") if isinstance(obj, dict) else None
-        square_order = obj.get("order") if isinstance(obj, dict) else None
+    # Only create a receipt when we get the real order with line items
+    if event_type != "order.created":
+        return {"ok": True, "ignored": True}
 
-        # In Square, user identity isn’t inherent—use a fixed demo user for now
-        user_id = "demo_user"
+    data = payload.get("data") or {}
+    obj = data.get("object") or {}
+    order = obj.get("order") if isinstance(obj, dict) else None
 
-        # If payment exists, create a simple "receipt" entry.
-        # We'll enrich this in the next step by fetching order line items via Square API (server-side).
-        if isinstance(square_payment, dict):
-            amount_money = square_payment.get("amount_money") or {}
-            total = (amount_money.get("amount") or 0) / 100
-            currency = (amount_money.get("currency") or "USD").upper()
+    if not isinstance(order, dict):
+        return {"ok": True, "ignored": True}
 
-            transaction = {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "merchant": "square",
-                "payment_id": square_payment.get("id"),
-                "timestamp": int(time.time()),
-                "currency": currency,
-                "total": total,
-                "items": [],  # next step: populate from order line items
-            }
+    # Square order fields
+    order_id = order.get("id")
+    location_id = order.get("location_id")
+    created_at = order.get("created_at")  # ISO timestamp string
+    line_items = order.get("line_items") or []
 
-            transactions.append(transaction)
+    # Totals
+    total_money = order.get("total_money") or {}
+    currency = (total_money.get("currency") or "USD").upper()
+    total = (total_money.get("amount") or 0) / 100
 
-        # If only an order exists (no payment in this webhook), we just acknowledge for now.
-        # Next step: we’ll choose events + pull line items properly.
+    # Build item lines
+    items = []
+    if isinstance(line_items, list):
+        for li in line_items:
+            if not isinstance(li, dict):
+                continue
+            name = li.get("name") or "Item"
+            qty_str = li.get("quantity") or "1"
+            try:
+                quantity = float(qty_str)
+                # Your app likely expects int-ish; keep it simple
+                if quantity.is_integer():
+                    quantity = int(quantity)
+            except Exception:
+                quantity = 1
 
+            # Square can put pricing in a few places
+            base_price = li.get("base_price_money") or {}
+            unit_price = (base_price.get("amount") or 0) / 100
+
+            variation_name = li.get("variation_name")
+            if variation_name:
+                display_name = f"{name} ({variation_name})"
+            else:
+                display_name = name
+
+            items.append(
+                {
+                    "sku": li.get("catalog_object_id"),  # may be None
+                    "name": display_name,
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                }
+            )
+
+    # IMPORTANT: for now we keep user_id demo_user (matches your app polling)
+    # Later we can set user_id from metadata, customer, or checkout reference.
+    transaction = {
+        "id": str(uuid.uuid4()),
+        "user_id": "demo_user",
+        "merchant": "square",
+        "payment_id": order_id,             # store order_id here for now
+        "timestamp": int(time.time()),      # simple epoch
+        "currency": currency,
+        "total": total,
+        "items": items,
+        "meta": {
+            "square_event": event_type,
+            "square_event_id": event_id,
+            "square_order_id": order_id,
+            "square_location_id": location_id,
+            "square_created_at": created_at,
+        },
+    }
+
+    # Extra protection: avoid duplicate receipts for the same order_id
+    if order_id:
+        for t in transactions:
+            if t.get("merchant") == "square" and t.get("meta", {}).get("square_order_id") == order_id:
+                print("↩️ Duplicate Square order ignored:", order_id)
+                return {"ok": True, "deduped_order": True}
+
+    transactions.append(transaction)
     return {"ok": True}
 
 # -------------------------
