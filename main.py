@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import os
 import uuid
 import stripe
@@ -9,7 +9,9 @@ import hmac
 import hashlib
 import base64
 import time
-from datetime import datetime
+import json
+import urllib.request
+import urllib.error
 
 app = FastAPI(title="Receipts API")
 
@@ -18,7 +20,7 @@ app = FastAPI(title="Receipts API")
 # -------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # demo: allow any origin
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -39,11 +41,8 @@ async def add_cors_headers(request: Request, call_next):
 # In-memory storage (NO DB)
 # -------------------------
 transactions: List[dict] = []
-
-# Square dedupe (in-memory)
 processed_square_event_ids: set[str] = set()
 seen_square_payment_ids: set[str] = set()
-seen_square_order_ids: set[str] = set()
 
 # -------------------------
 # Stripe setup
@@ -51,15 +50,20 @@ seen_square_order_ids: set[str] = set()
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 if not STRIPE_SECRET_KEY:
     print("WARNING: STRIPE_SECRET_KEY not set")
-
 stripe.api_key = STRIPE_SECRET_KEY
 
 # -------------------------
-# Square setup (webhooks)
+# Square setup
 # -------------------------
 SQUARE_WEBHOOK_SIGNATURE_KEY = os.getenv("SQUARE_WEBHOOK_SIGNATURE_KEY")
 if not SQUARE_WEBHOOK_SIGNATURE_KEY:
     print("WARNING: SQUARE_WEBHOOK_SIGNATURE_KEY not set (Square webhooks will NOT be verified)")
+
+SQUARE_ACCESS_TOKEN = os.getenv("SQUARE_ACCESS_TOKEN")
+if not SQUARE_ACCESS_TOKEN:
+    print("WARNING: SQUARE_ACCESS_TOKEN not set (Square SKU enrichment will be skipped)")
+
+SQUARE_API_BASE = "https://connect.squareup.com"
 
 def _square_expected_signature(signature_key: str, notification_url: str, body_bytes: bytes) -> str:
     message = (notification_url or "").encode("utf-8") + (body_bytes or b"")
@@ -74,77 +78,76 @@ def _request_public_url(request: Request) -> str:
     query = request.url.query
     return f"{proto}://{host}{path}" + (f"?{query}" if query else "")
 
-def _iso_to_epoch(iso_str: Optional[str]) -> Optional[int]:
-    if not iso_str:
-        return None
-    try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        return int(dt.timestamp())
-    except Exception:
-        return None
-
 def _money_to_float(m: dict) -> float:
     if not isinstance(m, dict):
         return 0.0
     return (m.get("amount") or 0) / 100
 
-def _extract_payment(payload: dict) -> Optional[dict]:
-    data = payload.get("data") or {}
-    obj = data.get("object") or {}
-    if isinstance(obj, dict) and isinstance(obj.get("payment"), dict):
-        return obj["payment"]
-    return None
+def _square_api(method: str, path: str, body: Optional[dict] = None) -> Optional[dict]:
+    """
+    Minimal Square API client using stdlib urllib (no new requirements).
+    Requires SQUARE_ACCESS_TOKEN.
+    """
+    if not SQUARE_ACCESS_TOKEN:
+        return None
 
-def _extract_order(payload: dict) -> Optional[dict]:
-    data = payload.get("data") or {}
-    obj = data.get("object") or {}
-    if isinstance(obj, dict) and isinstance(obj.get("order"), dict):
-        return obj["order"]
-    return None
+    url = f"{SQUARE_API_BASE}{path}"
+    data = None
+    headers = {
+        "Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Square-Version": "2025-01-23",  # safe pinned version
+    }
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
 
-def _extract_line_items_from_order(order: dict) -> list:
-    line_items = order.get("line_items") or []
-    if not isinstance(line_items, list):
-        return []
-
-    items = []
-    for li in line_items:
-        if not isinstance(li, dict):
-            continue
-
-        name = li.get("name") or "Item"
-        variation = li.get("variation_name")
-        display_name = f"{name} ({variation})" if variation else name
-
-        qty_str = li.get("quantity") or "1"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
         try:
-            q = float(qty_str)
-            quantity = int(q) if q.is_integer() else q
+            err = e.read().decode("utf-8")
         except Exception:
-            quantity = 1
+            err = str(e)
+        print(f"Square API error {e.code} on {method} {path}: {err}")
+        return None
+    except Exception as e:
+        print(f"Square API request failed on {method} {path}: {e}")
+        return None
 
-        base_price = li.get("base_price_money") or {}
-        unit_price = _money_to_float(base_price)
+def _square_catalog_skus_for_variations(variation_ids: List[str]) -> Dict[str, str]:
+    """
+    Given Square Catalog object IDs (ITEM_VARIATION ids), return {variation_id: sku}
+    """
+    if not variation_ids or not SQUARE_ACCESS_TOKEN:
+        return {}
 
-        items.append(
-            {
-                "sku": li.get("catalog_object_id"),
-                "name": display_name,
-                "quantity": quantity,
-                "unit_price": unit_price,
-            }
-        )
-    return items
+    # Deduplicate + cap to something reasonable
+    ids = list(dict.fromkeys([vid for vid in variation_ids if vid]))[:200]
+
+    res = _square_api("POST", "/v2/catalog/batch-retrieve", {"object_ids": ids, "include_related_objects": False})
+    if not res or "objects" not in res:
+        return {}
+
+    out: Dict[str, str] = {}
+    for obj in res.get("objects", []):
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") != "ITEM_VARIATION":
+            continue
+        oid = obj.get("id")
+        data = obj.get("item_variation_data") or {}
+        sku = data.get("sku")
+        if oid and sku:
+            out[oid] = sku
+    return out
 
 def _find_square_tx_by_payment_id(payment_id: str) -> Optional[dict]:
     for t in transactions:
         if t.get("merchant") == "square" and t.get("payment_id") == payment_id:
-            return t
-    return None
-
-def _find_square_tx_by_order_id(order_id: str) -> Optional[dict]:
-    for t in transactions:
-        if t.get("merchant") == "square" and t.get("meta", {}).get("square_order_id") == order_id:
             return t
     return None
 
@@ -158,22 +161,47 @@ async def stripe_webhook(request: Request):
 
     event = await request.json()
 
+    # Only completed checkout sessions
     if event.get("type") != "checkout.session.completed":
         return {"ok": True, "ignored": True}
 
     session = event["data"]["object"]
     user_id = session.get("client_reference_id") or "demo_user"
 
-    line_items = stripe.checkout.Session.list_line_items(session["id"])
+    # Pull itemized line items from Stripe
+    line_items = stripe.checkout.Session.list_line_items(session["id"], expand=["data.price.product"])
 
     items = []
     for li in line_items.data:
+        price = li.price
+        product = None
+        if price and hasattr(price, "product"):
+            product = price.product  # expanded product or id
+
+        # Best-effort SKU strategy:
+        # 1) price.lookup_key (if you set it as SKU)
+        # 2) product.metadata["sku"] (recommended)
+        # 3) fallback to product id
+        sku = None
+        if price and getattr(price, "lookup_key", None):
+            sku = price.lookup_key
+
+        # If product is expanded object:
+        if not sku and isinstance(product, stripe.Product):
+            sku = (product.metadata or {}).get("sku") or product.id
+        elif not sku and isinstance(product, str):
+            sku = product
+
+        unit_amount = 0
+        if price and getattr(price, "unit_amount", None):
+            unit_amount = price.unit_amount or 0
+
         items.append(
             {
-                "sku": li.price.product if li.price else None,
+                "sku": sku,
                 "name": li.description,
                 "quantity": li.quantity,
-                "unit_price": ((li.price.unit_amount or 0) / 100) if li.price else 0,
+                "unit_price": unit_amount / 100,
             }
         )
 
@@ -186,16 +214,19 @@ async def stripe_webhook(request: Request):
         "currency": (session.get("currency") or "usd").upper(),
         "total": (session.get("amount_total") or 0) / 100,
         "items": items,
+        "meta": {
+            "stripe_session": session,  # full raw session payload
+            "stripe_event_type": event.get("type"),
+        },
     }
 
     transactions.append(transaction)
     return {"ok": True}
 
 # -------------------------
-# Square Webhook (FIXED FOR REAL)
-# - Always create on payment.created (so app never goes blank)
-# - Dedupe payment_id so you don't get multiple "charges"
-# - Enrich/update from order.created/order.updated when items/totals appear
+# Square Webhook
+# - Create on payment.created (deduped)
+# - Enrich items + SKUs using order.* payload + Square Catalog API
 # -------------------------
 @app.post("/api/webhooks/square")
 async def square_webhook(request: Request):
@@ -230,11 +261,16 @@ async def square_webhook(request: Request):
     if event_id:
         processed_square_event_ids.add(event_id)
 
-    user_id = "demo_user"  # matches your app polling
+    user_id = "demo_user"
 
-    # ---- 1) payment.created => CREATE ONCE (reliably shows in app)
+    data = payload.get("data") or {}
+    obj = data.get("object") or {}
+    if not isinstance(obj, dict):
+        return {"ok": True, "ignored": True}
+
+    # ---- payment.created: create a receipt record (so app always shows something)
     if event_type == "payment.created":
-        payment = _extract_payment(payload)
+        payment = obj.get("payment")
         if not isinstance(payment, dict):
             return {"ok": True, "ignored": True}
 
@@ -242,7 +278,7 @@ async def square_webhook(request: Request):
         if not payment_id:
             return {"ok": True, "ignored": True}
 
-        # Dedup by payment_id
+        # Dedup per payment id
         if payment_id in seen_square_payment_ids or _find_square_tx_by_payment_id(payment_id):
             return {"ok": True, "deduped_payment": True}
         seen_square_payment_ids.add(payment_id)
@@ -250,11 +286,9 @@ async def square_webhook(request: Request):
         amount_money = payment.get("amount_money") or {}
         currency = (amount_money.get("currency") or "USD").upper()
         total = _money_to_float(amount_money)
-
         created_at_iso = payment.get("created_at")
-        ts = _iso_to_epoch(created_at_iso) or int(time.time())
+        ts = int(time.time())
 
-        # Sometimes Square includes order_id on payment
         order_id = payment.get("order_id") or payment.get("associated_order_id")
 
         tx = {
@@ -265,21 +299,20 @@ async def square_webhook(request: Request):
             "timestamp": ts,
             "currency": currency,
             "total": total,
-            "items": [],  # will be filled when we see order events
+            "items": [],
             "meta": {
+                "square_event_type": event_type,
+                "square_event_id": event_id,
+                "square_payment": payment,   # full raw payment payload
                 "square_order_id": order_id,
-                "square_payment_created_at": created_at_iso,
-                "square_last_event": event_type,
-                "square_last_event_id": event_id,
             },
         }
         transactions.append(tx)
-        print("✅ Square receipt CREATED from payment.created:", payment_id, "order:", order_id)
         return {"ok": True, "created": True}
 
-    # ---- 2) order.created / order.updated => ENRICH (items + totals)
+    # ---- order.created / order.updated: enrich the receipt with itemized lines + SKUs
     if event_type in ("order.created", "order.updated"):
-        order = _extract_order(payload)
+        order = obj.get("order")
         if not isinstance(order, dict):
             return {"ok": True, "ignored": True}
 
@@ -287,76 +320,92 @@ async def square_webhook(request: Request):
         if not order_id:
             return {"ok": True, "ignored": True}
 
-        # Extract order details
-        location_id = order.get("location_id")
-        created_at_iso = order.get("created_at")
-        ts = _iso_to_epoch(created_at_iso) or int(time.time())
+        # Build itemized lines from order payload
+        line_items = order.get("line_items") or []
+        variation_ids: List[str] = []
+        items: List[dict] = []
+
+        if isinstance(line_items, list):
+            for li in line_items:
+                if not isinstance(li, dict):
+                    continue
+                # In Square orders, catalog_object_id is typically the ITEM_VARIATION id
+                variation_id = li.get("catalog_object_id") or li.get("variation_id")
+                if variation_id:
+                    variation_ids.append(variation_id)
+
+        sku_map = _square_catalog_skus_for_variations(variation_ids)
+
+        if isinstance(line_items, list):
+            for li in line_items:
+                if not isinstance(li, dict):
+                    continue
+
+                name = li.get("name") or "Item"
+                variation_name = li.get("variation_name")
+                display_name = f"{name} ({variation_name})" if variation_name else name
+
+                qty_str = li.get("quantity") or "1"
+                try:
+                    q = float(qty_str)
+                    quantity = int(q) if q.is_integer() else q
+                except Exception:
+                    quantity = 1
+
+                base_price = li.get("base_price_money") or {}
+                unit_price = _money_to_float(base_price)
+
+                variation_id = li.get("catalog_object_id") or li.get("variation_id")
+                sku = sku_map.get(variation_id) or variation_id  # fallback to variation id
+
+                items.append(
+                    {
+                        "sku": sku,
+                        "name": display_name,
+                        "quantity": quantity,
+                        "unit_price": unit_price,
+                    }
+                )
 
         total_money = order.get("total_money") or {}
         currency = (total_money.get("currency") or "USD").upper()
         total = _money_to_float(total_money)
 
-        items = _extract_line_items_from_order(order)
+        # Attach to an existing Square payment receipt if we can find it by order_id in meta
+        # (we stored order_id on payment.created if it existed)
+        target = None
+        for t in reversed(transactions):
+            if t.get("merchant") != "square":
+                continue
+            if t.get("meta", {}).get("square_order_id") == order_id:
+                target = t
+                break
 
-        # Find an existing tx to update
-        existing = _find_square_tx_by_order_id(order_id)
+        # If we can't find by order_id (sometimes payment event doesn't include it),
+        # just update the most recent Square tx as a fallback.
+        if not target:
+            for t in reversed(transactions):
+                if t.get("merchant") == "square":
+                    target = t
+                    break
 
-        # If we don't have a receipt yet (because payment.created didn't include order_id),
-        # create one ONCE per order_id as a fallback.
-        if not existing:
-            if order_id in seen_square_order_ids:
-                return {"ok": True, "deduped_order": True}
-            seen_square_order_ids.add(order_id)
-
-            tx = {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "merchant": "square",
-                "payment_id": order_id,  # fallback
-                "timestamp": ts,
-                "currency": currency,
-                "total": total,
-                "items": items,
-                "meta": {
+        if target:
+            target["items"] = items
+            if total > 0:
+                target["total"] = total
+            target["currency"] = currency
+            target["meta"] = target.get("meta") or {}
+            target["meta"].update(
+                {
+                    "square_event_type": event_type,
+                    "square_event_id": event_id,
                     "square_order_id": order_id,
-                    "square_location_id": location_id,
-                    "square_order_created_at": created_at_iso,
-                    "square_last_event": event_type,
-                    "square_last_event_id": event_id,
-                },
-            }
-            transactions.append(tx)
-            print("✅ Square receipt CREATED from order event:", order_id)
-            return {"ok": True, "created_from_order": True}
+                    "square_order": order,  # full raw order payload
+                }
+            )
 
-        # Update existing receipt
-        if "meta" not in existing or not isinstance(existing["meta"], dict):
-            existing["meta"] = {}
+        return {"ok": True, "enriched": True}
 
-        # Only overwrite items if we have them
-        if items:
-            existing["items"] = items
-        # Only overwrite total if we have a non-zero total
-        if total > 0:
-            existing["total"] = total
-        if currency:
-            existing["currency"] = currency
-
-        existing["timestamp"] = ts
-        existing["meta"].update(
-            {
-                "square_order_id": order_id,
-                "square_location_id": location_id,
-                "square_order_created_at": created_at_iso or existing["meta"].get("square_order_created_at"),
-                "square_last_event": event_type,
-                "square_last_event_id": event_id,
-            }
-        )
-
-        print("✅ Square receipt UPDATED from order event:", order_id)
-        return {"ok": True, "updated": True}
-
-    # Everything else we ignore (prevents duplicates)
     return {"ok": True, "ignored": True}
 
 # -------------------------
