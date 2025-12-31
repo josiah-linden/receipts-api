@@ -198,7 +198,7 @@ def _find_square_tx_by_payment_id(payment_id: str) -> Optional[dict]:
     return None
 
 # -------------------------
-# ✅ Square OAuth Connect (NEW)
+# Square OAuth Connect
 # -------------------------
 @app.get("/square/connect")
 def square_connect():
@@ -209,11 +209,10 @@ def square_connect():
         raise HTTPException(status_code=500, detail="Missing SQUARE_APPLICATION_ID or SQUARE_REDIRECT_URL")
 
     square_env = (os.getenv("SQUARE_ENV") or "production").lower()
-
-if square_env == "sandbox":
-    base = "https://connect.squareupsandbox.com"
-else:
-    base = "https://connect.squareup.com"
+    if square_env == "sandbox":
+        base = "https://connect.squareupsandbox.com"
+    else:
+        base = "https://connect.squareup.com"
 
     scopes = " ".join([
         "ORDERS_READ",
