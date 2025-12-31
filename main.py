@@ -217,9 +217,6 @@ def square_connect():
     scopes = " ".join([
         "ORDERS_READ",
         "PAYMENTS_READ",
-        "CUSTOMERS_READ",
-        "MERCHANT_PROFILE_READ",
-        "LOCATIONS_READ",
     ])
 
     qs = urlencode({
