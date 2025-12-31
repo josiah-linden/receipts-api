@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse  # ✅ added RedirectResponse
 from typing import List, Optional, Dict
 import os
 import uuid
@@ -12,6 +12,7 @@ import time
 import json
 import urllib.request
 import urllib.error
+from urllib.parse import urlencode  # ✅ added urlencode
 
 app = FastAPI(title="Receipts API")
 
@@ -197,6 +198,36 @@ def _find_square_tx_by_payment_id(payment_id: str) -> Optional[dict]:
     return None
 
 # -------------------------
+# ✅ Square OAuth Connect (NEW)
+# -------------------------
+@app.get("/square/connect")
+def square_connect():
+    square_app_id = os.getenv("SQUARE_APPLICATION_ID")
+    square_redirect_url = os.getenv("SQUARE_REDIRECT_URL")
+
+    if not square_app_id or not square_redirect_url:
+        raise HTTPException(status_code=500, detail="Missing SQUARE_APPLICATION_ID or SQUARE_REDIRECT_URL")
+
+    base = "https://connect.squareupsandbox.com"
+    scopes = " ".join([
+        "ORDERS_READ",
+        "PAYMENTS_READ",
+        "CUSTOMERS_READ",
+        "MERCHANT_PROFILE_READ",
+        "LOCATIONS_READ",
+    ])
+
+    qs = urlencode({
+        "client_id": square_app_id,
+        "scope": scopes,
+        "session": "false",
+        "redirect_uri": square_redirect_url,
+    })
+
+    url = f"{base}/oauth2/authorize?{qs}"
+    return RedirectResponse(url)
+
+# -------------------------
 # Stripe Webhook
 # -------------------------
 @app.post("/webhooks/stripe")
@@ -352,29 +383,6 @@ def get_transactions(user_id: Optional[str] = None):
     if user_id:
         return [t for t in transactions if t.get("user_id") == user_id]
     return transactions
-# -------------------------
-# Square OAuth – Step 1 (connect)
-# -------------------------
-@app.get("/square/connect")
-def square_connect():
-    base = "https://connect.squareupsandbox.com"
-    scopes = " ".join([
-        "ORDERS_READ",
-        "PAYMENTS_READ",
-        "CUSTOMERS_READ",
-        "MERCHANT_PROFILE_READ",
-        "LOCATIONS_READ",
-    ])
-
-    url = (
-        f"{base}/oauth2/authorize"
-        f"?client_id={os.getenv('SQUARE_APPLICATION_ID')}"
-        f"&scope={scopes}"
-        f"&session=false"
-        f"&redirect_uri={os.getenv('SQUARE_REDIRECT_URL')}"
-    )
-
-    return JSONResponse({"connect_url": url})
 
 # -------------------------
 # Health check
