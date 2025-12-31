@@ -228,6 +228,48 @@ def square_connect():
 
     url = f"{base}/oauth2/authorize?{qs}"
     return RedirectResponse(url)
+@app.get("/square/callback")
+async def square_callback(request: Request):
+    code = request.query_params.get("code")
+    if not code:
+        return JSONResponse({"ok": False, "query": dict(request.query_params)}, status_code=400)
+
+    app_id = os.getenv("SQUARE_APPLICATION_ID")
+    app_secret = os.getenv("SQUARE_APPLICATION_SECRET")
+    redirect_url = os.getenv("SQUARE_REDIRECT_URL")
+    if not app_id or not app_secret or not redirect_url:
+        raise HTTPException(status_code=500, detail="Missing Square OAuth env vars")
+
+    token_url = "https://connect.squareup.com/oauth2/token"
+    payload = json.dumps({
+        "client_id": app_id,
+        "client_secret": app_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_url,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        token_url,
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8") or "{}")
+
+    # TEMP: store in memory (resets on deploy)
+    global square_oauth_tokens
+    try:
+        square_oauth_tokens
+    except NameError:
+        square_oauth_tokens = {}
+
+    merchant_id = data.get("merchant_id") or "unknown"
+    square_oauth_tokens[merchant_id] = data
+
+    return JSONResponse({"ok": True, "merchant_id": merchant_id})
 
 # -------------------------
 # Stripe Webhook
