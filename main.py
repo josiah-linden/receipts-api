@@ -352,6 +352,29 @@ def get_transactions(user_id: Optional[str] = None):
     if user_id:
         return [t for t in transactions if t.get("user_id") == user_id]
     return transactions
+# -------------------------
+# Square OAuth – Step 1 (connect)
+# -------------------------
+@app.get("/square/connect")
+def square_connect():
+    base = "https://connect.squareupsandbox.com"
+    scopes = " ".join([
+        "ORDERS_READ",
+        "PAYMENTS_READ",
+        "CUSTOMERS_READ",
+        "MERCHANT_PROFILE_READ",
+        "LOCATIONS_READ",
+    ])
+
+    url = (
+        f"{base}/oauth2/authorize"
+        f"?client_id={os.getenv('SQUARE_APPLICATION_ID')}"
+        f"&scope={scopes}"
+        f"&session=false"
+        f"&redirect_uri={os.getenv('SQUARE_REDIRECT_URL')}"
+    )
+
+    return JSONResponse({"connect_url": url})
 
 # -------------------------
 # Health check
