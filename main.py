@@ -208,7 +208,13 @@ def square_connect():
     if not square_app_id or not square_redirect_url:
         raise HTTPException(status_code=500, detail="Missing SQUARE_APPLICATION_ID or SQUARE_REDIRECT_URL")
 
+    square_env = (os.getenv("SQUARE_ENV") or "production").lower()
+
+if square_env == "sandbox":
     base = "https://connect.squareupsandbox.com"
+else:
+    base = "https://connect.squareup.com"
+
     scopes = " ".join([
         "ORDERS_READ",
         "PAYMENTS_READ",
