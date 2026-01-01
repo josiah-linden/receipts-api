@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse  # ✅ added RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from typing import List, Optional, Dict
 import os
 import uuid
@@ -12,7 +12,7 @@ import time
 import json
 import urllib.request
 import urllib.error
-from urllib.parse import urlencode  # ✅ added urlencode
+from urllib.parse import urlencode
 
 app = FastAPI(title="Receipts API")
 
@@ -94,7 +94,6 @@ def _square_api(method: str, path: str, body: Optional[dict] = None) -> Optional
         "Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}",
         "Accept": "application/json",
         "Content-Type": "application/json",
-        # Pick a stable version; doesn't need to be perfect for this demo
         "Square-Version": "2025-01-23",
     }
     if body is not None:
@@ -117,7 +116,6 @@ def _square_api(method: str, path: str, body: Optional[dict] = None) -> Optional
         return None
 
 def _square_get_order(order_id: str) -> Optional[dict]:
-    # Orders API: GET /v2/orders/{order_id}
     res = _square_api("GET", f"/v2/orders/{order_id}")
     if not res:
         return None
@@ -179,7 +177,7 @@ def _order_to_items(order: dict) -> List[dict]:
         unit_price = _money_to_float(base_price)
 
         vid = li.get("catalog_object_id") or li.get("variation_id")
-        sku = sku_map.get(vid) or vid  # fallback: variation id
+        sku = sku_map.get(vid) or vid
 
         items.append(
             {
@@ -229,7 +227,6 @@ def square_connect():
     url = f"{base}/oauth2/authorize?{qs}"
     return RedirectResponse(url)
 
-
 @app.get("/square/callback")
 async def square_callback(request: Request):
     code = request.query_params.get("code")
@@ -261,7 +258,6 @@ async def square_callback(request: Request):
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = json.loads(resp.read().decode("utf-8") or "{}")
 
-    # TEMP: store in memory (resets on deploy)
     global square_oauth_tokens
     try:
         square_oauth_tokens
@@ -271,7 +267,7 @@ async def square_callback(request: Request):
     merchant_id = data.get("merchant_id") or "unknown"
     square_oauth_tokens[merchant_id] = data
 
-    # 🔑 IMPORTANT: use this merchant token for enrichment (TEMP shortcut)
+    # TEMP shortcut: use merchant token for enrichment
     global SQUARE_ACCESS_TOKEN
     SQUARE_ACCESS_TOKEN = data.get("access_token")
 
@@ -374,72 +370,44 @@ async def square_webhook(request: Request):
 
     user_id = "demo_user"
 
-   # Treat both payment.created and payment.updated as enrichment triggers
-if event_type in ("payment.created", "payment.updated"):
-    payment = obj.get("payment")
-    if not isinstance(payment, dict):
-        return {"ok": True, "ignored": True}
+    # Treat both payment.created and payment.updated as enrichment triggers
+    if event_type in ("payment.created", "payment.updated"):
+        payment = obj.get("payment")
+        if not isinstance(payment, dict):
+            return {"ok": True, "ignored": True}
 
-    payment_id = payment.get("id")
-    if not payment_id:
-        return {"ok": True, "ignored": True}
+        payment_id = payment.get("id")
+        if not payment_id:
+            return {"ok": True, "ignored": True}
 
-    amount_money = payment.get("amount_money") or {}
-    currency = (amount_money.get("currency") or "USD").upper()
-    total = _money_to_float(amount_money)
+        amount_money = payment.get("amount_money") or {}
+        currency = (amount_money.get("currency") or "USD").upper()
+        total = _money_to_float(amount_money)
 
-    ts = int(time.time())
-    order_id = payment.get("order_id") or payment.get("associated_order_id")
+        ts = int(time.time())
+        order_id = payment.get("order_id") or payment.get("associated_order_id")
 
-    # Try to fetch the full order + item lines now (often succeeds on payment.updated)
-    items: List[dict] = []
-    order_full = None
-    if order_id and SQUARE_ACCESS_TOKEN:
-        order_full = _square_get_order(order_id)
-        if isinstance(order_full, dict):
-            items = _order_to_items(order_full)
-
-    existing = _find_square_tx_by_payment_id(payment_id)
-
-    # If we already created the tx on payment.created, upgrade it with items/order on update
-    if existing:
-        # only overwrite if we found better data
-        if items:
-            existing["items"] = items
-        if order_full is not None:
-            existing["meta"]["square_order"] = order_full
-        existing["meta"]["square_event_type"] = event_type
-        existing["meta"]["square_event_id"] = event_id
-        return {"ok": True, "updated_existing": True}
-
-    # Otherwise create a new one (first time we see this payment)
-    tx = {
-        "id": str(uuid.uuid4()),
-        "user_id": "demo_user",
-        "merchant": "square",
-        "payment_id": payment_id,
-        "timestamp": ts,
-        "currency": currency,
-        "total": total,
-        "items": items,
-        "meta": {
-            "square_event_type": event_type,
-            "square_event_id": event_id,
-            "square_order_id": order_id,
-            "square_payment": payment,
-            "square_order": order_full,
-        },
-    }
-    transactions.append(tx)
-    return {"ok": True, "created": True}
-
-        # Try to fetch the full order + item lines right now
+        # Try to fetch the full order + item lines (often succeeds on payment.updated)
         items: List[dict] = []
         order_full = None
         if order_id and SQUARE_ACCESS_TOKEN:
             order_full = _square_get_order(order_id)
             if isinstance(order_full, dict):
                 items = _order_to_items(order_full)
+
+        existing = _find_square_tx_by_payment_id(payment_id)
+        if existing:
+            if items:
+                existing["items"] = items
+            if order_full is not None:
+                existing["meta"]["square_order"] = order_full
+            existing["meta"]["square_event_type"] = event_type
+            existing["meta"]["square_event_id"] = event_id
+            return {"ok": True, "updated_existing": True}
+
+        if payment_id in seen_square_payment_ids:
+            return {"ok": True, "deduped_payment": True}
+        seen_square_payment_ids.add(payment_id)
 
         tx = {
             "id": str(uuid.uuid4()),
@@ -455,11 +423,11 @@ if event_type in ("payment.created", "payment.updated"):
                 "square_event_id": event_id,
                 "square_order_id": order_id,
                 "square_payment": payment,
-                "square_order": order_full,  # may be None if not fetched
+                "square_order": order_full,
             },
         }
         transactions.append(tx)
-        return {"ok": True}
+        return {"ok": True, "created": True}
 
     return {"ok": True, "ignored": True}
 
