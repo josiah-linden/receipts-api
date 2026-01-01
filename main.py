@@ -462,6 +462,45 @@ async def square_webhook(request: Request):
 async def get_transactions(user_id: str = "demo_user"):
     return [t for t in transactions if t.get("user_id") == user_id]
 
+@app.post("/api/square/backfill")
+async def square_backfill(user_id: str = "demo_user", limit: int = 50):
+    if not SQUARE_ACCESS_TOKEN:
+        raise HTTPException(status_code=500, detail="SQUARE_ACCESS_TOKEN missing; re-connect Square OAuth first.")
+
+    updated = 0
+    checked = 0
+
+    # newest first
+    for t in reversed(transactions):
+        if checked >= limit:
+            break
+        if t.get("user_id") != user_id:
+            continue
+        if t.get("merchant") != "square":
+            continue
+
+        checked += 1
+
+        meta = t.get("meta") or {}
+        order_id = meta.get("square_order_id")
+        if not order_id:
+            continue
+
+        # only backfill if missing
+        if t.get("items") and meta.get("square_order"):
+            continue
+
+        order_full = _square_get_order(order_id)
+        if isinstance(order_full, dict):
+            items = _order_to_items(order_full)
+            if items:
+                t["items"] = items
+            meta["square_order"] = order_full
+            t["meta"] = meta
+            updated += 1
+
+    return {"ok": True, "checked": checked, "updated": updated}
+
 @app.get("/")
 async def root():
     return {"ok": True, "service": "receipts-ingestion"}
