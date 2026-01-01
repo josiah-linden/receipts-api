@@ -374,26 +374,64 @@ async def square_webhook(request: Request):
 
     user_id = "demo_user"
 
-    # Create receipt on payment.created, but also ENRICH immediately by fetching the order
-    if event_type == "payment.created":
-        payment = obj.get("payment")
-        if not isinstance(payment, dict):
-            return {"ok": True, "ignored": True}
+   # Treat both payment.created and payment.updated as enrichment triggers
+if event_type in ("payment.created", "payment.updated"):
+    payment = obj.get("payment")
+    if not isinstance(payment, dict):
+        return {"ok": True, "ignored": True}
 
-        payment_id = payment.get("id")
-        if not payment_id:
-            return {"ok": True, "ignored": True}
+    payment_id = payment.get("id")
+    if not payment_id:
+        return {"ok": True, "ignored": True}
 
-        if payment_id in seen_square_payment_ids or _find_square_tx_by_payment_id(payment_id):
-            return {"ok": True, "deduped_payment": True}
-        seen_square_payment_ids.add(payment_id)
+    amount_money = payment.get("amount_money") or {}
+    currency = (amount_money.get("currency") or "USD").upper()
+    total = _money_to_float(amount_money)
 
-        amount_money = payment.get("amount_money") or {}
-        currency = (amount_money.get("currency") or "USD").upper()
-        total = _money_to_float(amount_money)
+    ts = int(time.time())
+    order_id = payment.get("order_id") or payment.get("associated_order_id")
 
-        ts = int(time.time())
-        order_id = payment.get("order_id") or payment.get("associated_order_id")
+    # Try to fetch the full order + item lines now (often succeeds on payment.updated)
+    items: List[dict] = []
+    order_full = None
+    if order_id and SQUARE_ACCESS_TOKEN:
+        order_full = _square_get_order(order_id)
+        if isinstance(order_full, dict):
+            items = _order_to_items(order_full)
+
+    existing = _find_square_tx_by_payment_id(payment_id)
+
+    # If we already created the tx on payment.created, upgrade it with items/order on update
+    if existing:
+        # only overwrite if we found better data
+        if items:
+            existing["items"] = items
+        if order_full is not None:
+            existing["meta"]["square_order"] = order_full
+        existing["meta"]["square_event_type"] = event_type
+        existing["meta"]["square_event_id"] = event_id
+        return {"ok": True, "updated_existing": True}
+
+    # Otherwise create a new one (first time we see this payment)
+    tx = {
+        "id": str(uuid.uuid4()),
+        "user_id": "demo_user",
+        "merchant": "square",
+        "payment_id": payment_id,
+        "timestamp": ts,
+        "currency": currency,
+        "total": total,
+        "items": items,
+        "meta": {
+            "square_event_type": event_type,
+            "square_event_id": event_id,
+            "square_order_id": order_id,
+            "square_payment": payment,
+            "square_order": order_full,
+        },
+    }
+    transactions.append(tx)
+    return {"ok": True, "created": True}
 
         # Try to fetch the full order + item lines right now
         items: List[dict] = []
