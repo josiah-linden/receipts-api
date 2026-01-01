@@ -371,7 +371,7 @@ async def square_webhook(request: Request):
     user_id = "demo_user"
 
     # Treat both payment.created and payment.updated as enrichment triggers
-    if event_type in ("payment.created", "payment.updated"):
+    if event_type in ("payment.created", "payment.updated", "order.updated"):
         payment = obj.get("payment")
         if not isinstance(payment, dict):
             return {"ok": True, "ignored": True}
