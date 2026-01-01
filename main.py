@@ -68,7 +68,7 @@ SQUARE_API_BASE = "https://connect.squareup.com"
 
 def _square_expected_signature(signature_key: str, notification_url: str, body_bytes: bytes) -> str:
     message = (notification_url or "").encode("utf-8") + (body_bytes or b"")
-    digest = hmac.new(signature_key.encode("utf-8"), message, hashlib.sha1).digest()
+    digest = hmac.new(signature_key.encode("utf-8"), message, hashlib.sha256).digest()
     return base64.b64encode(digest).decode("utf-8")
 
 def _request_public_url(request: Request) -> str:
@@ -343,7 +343,7 @@ async def square_webhook(request: Request):
     if SQUARE_WEBHOOK_SIGNATURE_KEY:
         notification_url = _request_public_url(request)
         expected = _square_expected_signature(SQUARE_WEBHOOK_SIGNATURE_KEY, notification_url, body_bytes)
-        provided = request.headers.get("x-square-hmacsha1-signature") or ""
+        provided = request.headers.get("x-square-hmacsha256-signature") or ""
         if not hmac.compare_digest(expected, provided):
             raise HTTPException(status_code=401, detail="Invalid Square webhook signature")
 
