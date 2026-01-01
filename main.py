@@ -8,6 +8,7 @@ import hmac
 import hashlib
 import base64
 import urllib.request
+import sqlite3
 from typing import List, Optional, Dict
 from urllib.parse import urlencode
 
@@ -18,6 +19,88 @@ app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 # -------------------------
 transactions: List[dict] = []
 processed_square_event_ids = set()
+# -------------------------
+# SQLite (demo spreadsheet)
+# -------------------------
+DB_PATH = os.getenv("DB_PATH") or "receipts.db"
+
+def _db_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+def _db_init():
+    conn = _db_conn()
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS receipt_items (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      merchant TEXT,
+      payment_id TEXT,
+      order_id TEXT,
+      sku TEXT,
+      item_name TEXT,
+      quantity REAL,
+      unit_price REAL,
+      currency TEXT,
+      total REAL,
+      ts INTEGER
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+_db_init()
+def _db_write_tx(tx: dict):
+    """Upsert receipt line items into SQLite (demo-friendly, spreadsheet-like)."""
+    if not isinstance(tx, dict):
+        return
+
+    user_id = tx.get("user_id") or "demo_user"
+    merchant = tx.get("merchant") or ""
+    payment_id = tx.get("payment_id") or ""
+    currency = tx.get("currency") or ""
+    total = tx.get("total") or 0
+    ts = tx.get("timestamp") or int(time.time())
+
+    meta = tx.get("meta") or {}
+    order_id = meta.get("square_order_id") or meta.get("order_id") or ""
+
+    items = tx.get("items") or []
+    if not isinstance(items, list):
+        items = []
+
+    # If there are no items, still store a "header-ish" row so you can see the receipt exists.
+    # (We'll overwrite it later once items arrive.)
+    if not items:
+        items = [{"sku": None, "name": "(no items yet)", "quantity": 0, "unit_price": 0}]
+
+    conn = _db_conn()
+    cur = conn.cursor()
+
+    # delete old rows for this payment so the table stays clean on updates
+    cur.execute(
+        "DELETE FROM receipt_items WHERE user_id=? AND merchant=? AND payment_id=?",
+        (user_id, merchant, payment_id),
+    )
+
+    for i in items:
+        sku = (i or {}).get("sku")
+        name = (i or {}).get("name") or ""
+        qty = (i or {}).get("quantity") or 0
+        unit_price = (i or {}).get("unit_price") or 0
+
+        row_id = str(uuid.uuid4())
+        cur.execute(
+            """
+            INSERT INTO receipt_items
+            (id, user_id, merchant, payment_id, order_id, sku, item_name, quantity, unit_price, currency, total, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (row_id, user_id, merchant, payment_id, order_id, sku, name, float(qty), float(unit_price), currency, float(total), int(ts)),
+        )
+
+    conn.commit()
+    conn.close()
+
 square_oauth_tokens: Dict[str, dict] = {}
 
 # -------------------------
@@ -431,6 +514,7 @@ async def square_webhook(request: Request):
             existing["meta"]["square_event_type"] = event_type
             existing["meta"]["square_event_id"] = event_id
             existing["meta"]["square_order_id"] = order_id or existing["meta"].get("square_order_id")
+            _db_write_tx(existing)
             return {"ok": True, "updated_existing": True}
 
         tx = {
@@ -451,9 +535,110 @@ async def square_webhook(request: Request):
             },
         }
         transactions.append(tx)
+        _db_write_tx(tx)
         return {"ok": True, "created": True}
 
+
     return {"ok": True, "ignored": True}
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/demo/receipts", response_class=HTMLResponse)
+async def demo_receipts(user_id: str = "demo_user", limit: int = 200):
+    """
+    Simple demo UI: renders receipt_items as an HTML table (spreadsheet vibe).
+    """
+    conn = _db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+          ts, merchant, payment_id, order_id, item_name, sku, quantity, unit_price, currency, total
+        FROM receipt_items
+        WHERE user_id=?
+        ORDER BY ts DESC
+        LIMIT ?
+        """,
+        (user_id, int(limit)),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    def esc(s):
+        s = "" if s is None else str(s)
+        return (
+            s.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+             .replace('"', "&quot;")
+        )
+
+    html = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Receipts Demo</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; background:#0b0b0d; color:#f3f4f6;}
+    .wrap{max-width:1200px; margin:0 auto;}
+    h1{margin:0 0 8px 0; font-size:18px;}
+    .sub{opacity:.8; margin-bottom:12px; font-size:13px;}
+    table{width:100%; border-collapse:collapse; background:#111114; border:1px solid #222; border-radius:10px; overflow:hidden;}
+    th,td{padding:10px 8px; border-bottom:1px solid #1f1f24; font-size:12px; vertical-align:top;}
+    th{position:sticky; top:0; background:#14141a; text-align:left; font-weight:600;}
+    tr:hover td{background:#12121a;}
+    .pill{display:inline-block; padding:2px 8px; border:1px solid #2b2b35; border-radius:999px; font-size:11px; opacity:.9;}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;}
+    .right{text-align:right;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Receipts (demo table)</h1>
+    <div class="sub">URL params: <span class="mono">?user_id=demo_user&limit=200</span></div>
+    <table>
+      <thead>
+        <tr>
+          <th>ts</th>
+          <th>merchant</th>
+          <th>payment_id</th>
+          <th>order_id</th>
+          <th>item</th>
+          <th>sku</th>
+          <th class="right">qty</th>
+          <th class="right">unit</th>
+          <th>currency</th>
+          <th class="right">total</th>
+        </tr>
+      </thead>
+      <tbody>
+"""
+    for r in rows:
+        ts, merchant, payment_id, order_id, item_name, sku, qty, unit_price, currency, total = r
+        html += "<tr>"
+        html += f"<td class='mono'>{esc(ts)}</td>"
+        html += f"<td><span class='pill'>{esc(merchant)}</span></td>"
+        html += f"<td class='mono'>{esc(payment_id)}</td>"
+        html += f"<td class='mono'>{esc(order_id)}</td>"
+        html += f"<td>{esc(item_name)}</td>"
+        html += f"<td class='mono'>{esc(sku)}</td>"
+        html += f"<td class='right'>{esc(qty)}</td>"
+        html += f"<td class='right'>{esc(unit_price)}</td>"
+        html += f"<td class='mono'>{esc(currency)}</td>"
+        html += f"<td class='right'>{esc(total)}</td>"
+        html += "</tr>"
+
+    html += """
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
+"""
+    return HTMLResponse(html)
+
 
 # -------------------------
 # API your app calls
