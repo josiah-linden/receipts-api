@@ -228,6 +228,8 @@ def square_connect():
 
     url = f"{base}/oauth2/authorize?{qs}"
     return RedirectResponse(url)
+
+
 @app.get("/square/callback")
 async def square_callback(request: Request):
     code = request.query_params.get("code")
@@ -268,6 +270,10 @@ async def square_callback(request: Request):
 
     merchant_id = data.get("merchant_id") or "unknown"
     square_oauth_tokens[merchant_id] = data
+
+    # 🔑 IMPORTANT: use this merchant token for enrichment (TEMP shortcut)
+    global SQUARE_ACCESS_TOKEN
+    SQUARE_ACCESS_TOKEN = data.get("access_token")
 
     return JSONResponse({"ok": True, "merchant_id": merchant_id})
 
