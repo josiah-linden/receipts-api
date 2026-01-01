@@ -341,7 +341,7 @@ async def square_webhook(request: Request):
         payload = None
 
     if SQUARE_WEBHOOK_SIGNATURE_KEY:
-        notification_url = _request_public_url(request)
+        notification_url = os.getenv("SQUARE_WEBHOOK_NOTIFICATION_URL") or _request_public_url(request)
         expected = _square_expected_signature(SQUARE_WEBHOOK_SIGNATURE_KEY, notification_url, body_bytes)
         provided = request.headers.get("x-square-hmacsha256-signature") or ""
         if not hmac.compare_digest(expected, provided):
