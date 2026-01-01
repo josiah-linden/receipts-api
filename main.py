@@ -18,6 +18,7 @@ app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 # -------------------------
 transactions: List[dict] = []
 processed_square_event_ids = set()
+square_oauth_tokens: Dict[str, dict] = {}
 
 # -------------------------
 # Helpers
