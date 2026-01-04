@@ -19,6 +19,7 @@ app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 # -------------------------
 transactions: List[dict] = []
 processed_square_event_ids = set()
+qbo_tokens: Dict[str, dict] = {}
 # -------------------------
 # SQLite (demo spreadsheet)
 # -------------------------
@@ -45,10 +46,86 @@ def _db_init():
       ts INTEGER
     )
     """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS qbo_tokens (
+      realm_id TEXT PRIMARY KEY,
+      access_token TEXT,
+      refresh_token TEXT,
+      expires_at INTEGER,
+      raw_json TEXT
+    )
+    """)
     conn.commit()
     conn.close()
 
 _db_init()
+def _db_save_qbo_token(realm_id: str, tok: dict) -> None:
+    if not realm_id or not isinstance(tok, dict):
+        return
+
+    expires_at = tok.get("expires_at")
+    expires_in = tok.get("expires_in")
+    if expires_at is None and expires_in:
+        try:
+            expires_at = int(time.time()) + int(expires_in)
+        except (TypeError, ValueError):
+            expires_at = None
+
+    tok = dict(tok)
+    if expires_at is not None:
+        tok["expires_at"] = expires_at
+
+    conn = _db_conn()
+    conn.execute(
+        """
+        INSERT INTO qbo_tokens (realm_id, access_token, refresh_token, expires_at, raw_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(realm_id) DO UPDATE SET
+          access_token=excluded.access_token,
+          refresh_token=excluded.refresh_token,
+          expires_at=excluded.expires_at,
+          raw_json=excluded.raw_json
+        """,
+        (
+            str(realm_id),
+            tok.get("access_token"),
+            tok.get("refresh_token"),
+            expires_at,
+            json.dumps(tok),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+def _db_load_qbo_tokens() -> None:
+    global qbo_tokens
+    conn = _db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT realm_id, access_token, refresh_token, expires_at, raw_json FROM qbo_tokens")
+    rows = cur.fetchall()
+    conn.close()
+
+    loaded: Dict[str, dict] = {}
+    for realm_id, access_token, refresh_token, expires_at, raw_json in rows:
+        tok: Dict[str, object]
+        if raw_json:
+            try:
+                tok = json.loads(raw_json)
+            except json.JSONDecodeError:
+                tok = {}
+        else:
+            tok = {}
+        if access_token:
+            tok["access_token"] = access_token
+        if refresh_token:
+            tok["refresh_token"] = refresh_token
+        if expires_at is not None:
+            tok["expires_at"] = expires_at
+        loaded[str(realm_id)] = tok
+
+    qbo_tokens = loaded
+
+_db_load_qbo_tokens()
 def _db_write_tx(tx: dict):
     """Upsert receipt line items into SQLite (demo-friendly, spreadsheet-like)."""
     if not isinstance(tx, dict):
@@ -513,7 +590,6 @@ QBO_CLIENT_SECRET = os.getenv("QBO_CLIENT_SECRET")
 QBO_REDIRECT_URI = os.getenv("QBO_REDIRECT_URI")
 QBO_ENV = os.getenv("QBO_ENV", "sandbox")  # "sandbox" or "production"
 
-qbo_tokens: Dict[str, dict] = {}
 # -------------------------
 # QuickBooks: minimal POST helpers (SalesReceipt)
 # -------------------------
@@ -636,7 +712,14 @@ async def quickbooks_exchange(code: str, realmId: str):
         return {"ok": False, "status": r.status_code, "detail": r.text}
 
     tok = r.json()
+    expires_in = tok.get("expires_in")
+    if expires_in:
+        try:
+            tok["expires_at"] = int(time.time()) + int(expires_in)
+        except (TypeError, ValueError):
+            pass
     qbo_tokens[str(realmId)] = tok
+    _db_save_qbo_token(realmId, tok)
     return {"ok": True, "realm_id": realmId}
 
 def _qbo_get_or_create_item(access_token: str, realm_id: str) -> str:
