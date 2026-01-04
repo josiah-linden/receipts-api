@@ -364,6 +364,14 @@ def quickbooks_connect():
     url = f"{base_url}?{urllib.parse.urlencode(params)}"
     return RedirectResponse(url)
 
+@app.get("/api/quickbooks/callback")
+async def quickbooks_callback(code: str, realmId: str):
+    return {
+        "ok": True,
+        "code": code,
+        "realm_id": realmId
+    }
+
 # -------------------------
 # Stripe Webhook
 # -------------------------
