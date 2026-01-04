@@ -371,6 +371,56 @@ async def quickbooks_callback(code: str, realmId: str):
         "code": code,
         "realm_id": realmId
     }
+
+# -------------------------
+# QuickBooks: read CompanyInfo (sanity check)
+# -------------------------
+QBO_BASE = "https://quickbooks.api.intuit.com"
+
+def _qbo_request(realm_id: str, path: str, access_token: str) -> dict:
+    url = f"{QBO_BASE}{path}"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8") or "{}"
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        try:
+            err = e.read().decode("utf-8")
+        except Exception:
+            err = str(e)
+        return {"error": True, "status": e.code, "detail": err}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
+
+@app.get("/api/quickbooks/companyinfo")
+async def quickbooks_companyinfo(realm_id: str):
+    # Requires that quickbooks_callback stored tokens somewhere like:
+    # qbo_tokens[realm_id] = {"access_token": "...", ...}
+    try:
+        global qbo_tokens
+    except NameError:
+        qbo_tokens = {}
+
+    tok = qbo_tokens.get(realm_id) or {}
+    access_token = tok.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=401, detail="No QuickBooks token for this realm_id. Reconnect QuickBooks.")
+
+    # CompanyInfo endpoint expects both company_id and companyinfo_id = realm_id
+    path = f"/v3/company/{realm_id}/companyinfo/{realm_id}?minorversion=65"
+    data = _qbo_request(realm_id, path, access_token)
+
+    # If token expired/revoked, you'll see 401 here
+    if isinstance(data, dict) and data.get("status") == 401:
+        raise HTTPException(status_code=401, detail="QuickBooks token expired. Reconnect QuickBooks.")
+
+    return data
+
 import requests
 from requests.auth import HTTPBasicAuth
 
