@@ -371,6 +371,46 @@ async def quickbooks_callback(code: str, realmId: str):
         "code": code,
         "realm_id": realmId
     }
+import requests
+from requests.auth import HTTPBasicAuth
+
+QBO_CLIENT_ID = os.getenv("QBO_CLIENT_ID")
+QBO_CLIENT_SECRET = os.getenv("QBO_CLIENT_SECRET")
+QBO_REDIRECT_URI = os.getenv("QBO_REDIRECT_URI")
+QBO_ENV = os.getenv("QBO_ENV", "sandbox")  # "sandbox" or "production"
+
+qbo_tokens: Dict[str, dict] = {}
+
+def _qbo_base_url() -> str:
+    return "https://oauth.platform.intuit.com"  # token endpoint is same for sandbox/prod
+
+@app.get("/api/quickbooks/exchange")
+async def quickbooks_exchange(code: str, realmId: str):
+    if not QBO_CLIENT_ID or not QBO_CLIENT_SECRET or not QBO_REDIRECT_URI:
+        raise HTTPException(status_code=500, detail="Missing QBO env vars")
+
+    token_url = f"{_qbo_base_url()}/oauth2/v1/tokens/bearer"
+
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": QBO_REDIRECT_URI,
+    }
+
+    r = requests.post(
+        token_url,
+        data=data,
+        headers={"Accept": "application/json"},
+        auth=HTTPBasicAuth(QBO_CLIENT_ID, QBO_CLIENT_SECRET),
+        timeout=20,
+    )
+
+    if r.status_code >= 400:
+        return {"ok": False, "status": r.status_code, "detail": r.text}
+
+    tok = r.json()
+    qbo_tokens[str(realmId)] = tok
+    return {"ok": True, "realm_id": realmId}
 
 # -------------------------
 # Stripe Webhook
