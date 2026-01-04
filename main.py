@@ -396,6 +396,60 @@ def _qbo_request(realm_id: str, path: str, access_token: str) -> dict:
         return {"error": True, "status": e.code, "detail": err}
     except Exception as e:
         return {"error": True, "detail": str(e)}
+def _qbo_post(realm_id: str, path: str, access_token: str, payload: dict) -> dict:
+    url = f"{QBO_BASE}{path}"
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8") or "{}"
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        try:
+            err = e.read().decode("utf-8")
+        except Exception:
+            err = str(e)
+        return {"error": True, "status": e.code, "detail": err}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
+def maybe_autopost_to_qbo_from_tx(tx: dict):
+    if not qbo_tokens or not tx.get("items"):
+        return
+
+    realm_id = list(qbo_tokens.keys())[0]
+    access_token = qbo_tokens[realm_id]["access_token"]
+
+    lines = []
+    for item in tx["items"]:
+        lines.append({
+            "DetailType": "SalesItemLineDetail",
+            "Amount": item["unit_price"] * item["quantity"],
+            "SalesItemLineDetail": {
+                "Qty": item["quantity"],
+                "UnitPrice": item["unit_price"],
+                "ItemRef": {
+                    "name": item["name"],
+                    "value": "1"  # demo item
+                }
+            }
+        })
+
+    payload = {
+        "Line": lines,
+        "TotalAmt": tx["total"]
+    }
+
+    return _qbo_post(
+        realm_id,
+        f"/v3/company/{realm_id}/salesreceipt",
+        access_token,
+        payload
+    )
 
 @app.get("/api/quickbooks/companyinfo")
 async def quickbooks_companyinfo(realm_id: str):
@@ -652,6 +706,7 @@ async def square_webhook(request: Request):
         }
         transactions.append(tx)
         _db_write_tx(tx)
+        maybe_autopost_to_qbo_from_tx(tx)
         return {"ok": True, "created": True}
 
 
