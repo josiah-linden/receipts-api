@@ -346,6 +346,24 @@ async def square_callback(code: str):
 
     return JSONResponse({"ok": True, "merchant_id": merchant_id})
 
+from fastapi.responses import RedirectResponse
+import urllib.parse
+import os
+
+@app.get("/api/quickbooks/connect")
+def quickbooks_connect():
+    params = {
+        "client_id": os.getenv("QBO_CLIENT_ID"),
+        "redirect_uri": os.getenv("QBO_REDIRECT_URI"),
+        "response_type": "code",
+        "scope": "com.intuit.quickbooks.accounting",
+        "state": "demo_user",
+    }
+
+    base_url = "https://appcenter.intuit.com/connect/oauth2"
+    url = f"{base_url}?{urllib.parse.urlencode(params)}"
+    return RedirectResponse(url)
+
 # -------------------------
 # Stripe Webhook
 # -------------------------
