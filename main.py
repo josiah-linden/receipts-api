@@ -423,39 +423,63 @@ def _qbo_post(realm_id: str, path: str, access_token: str, payload: dict) -> dic
         return {"error": True, "status": e.code, "detail": err}
     except Exception as e:
         return {"error": True, "detail": str(e)}
+
+def _qbo_query(realm_id: str, query: str, access_token: str) -> dict:
+    url = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/query?minorversion=65"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "text/plain",
+    }
+    req = urllib.request.Request(url, data=query.encode("utf-8"), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode("utf-8") or "{}"
+        return json.loads(raw)
+
+def _qbo_get_first_item_id(access_token: str, realm_id: str) -> Optional[str]:
+    data = _qbo_query(realm_id, "select Id, Name from Item maxresults 1", access_token)
+    items = (data.get("QueryResponse") or {}).get("Item") or []
+    if items:
+        return items[0].get("Id")
+    return None
+
 def maybe_autopost_to_qbo_from_tx(tx: dict):
     if not qbo_tokens or not tx.get("items"):
         return
 
     realm_id = list(qbo_tokens.keys())[0]
     access_token = qbo_tokens[realm_id]["access_token"]
+    item_id = _qbo_get_first_item_id(access_token, realm_id)
+    if not item_id:
+        return
 
     lines = []
     for item in tx["items"]:
+        qty = item.get("quantity") or 0
+        unit_price = item.get("unit_price") or 0
         lines.append({
             "DetailType": "SalesItemLineDetail",
-            "Amount": item["unit_price"] * item["quantity"],
+            "Amount": unit_price * qty,
+            "Description": item.get("name") or "",
             "SalesItemLineDetail": {
-                "Qty": item["quantity"],
-                "UnitPrice": item["unit_price"],
-                "ItemRef": {
-                    "name": item["name"],
-                    "value": qbo_item_id  # demo item
-                }
-            }
+                "Qty": qty,
+                "UnitPrice": unit_price,
+                "ItemRef": {"value": item_id},
+            },
         })
 
     payload = {
         "Line": lines,
-        "TotalAmt": tx["total"]
+        "TotalAmt": tx["total"],
     }
 
-    return _qbo_post(
+    resp = _qbo_post(
         realm_id,
-        f"/v3/company/{realm_id}/salesreceipt",
+        f"/v3/company/{realm_id}/salesreceipt?minorversion=65",
         access_token,
-        payload
+        payload,
     )
+    print("QBO salesreceipt resp:", resp)
 
 @app.get("/api/quickbooks/companyinfo")
 async def quickbooks_companyinfo(realm_id: str):
@@ -515,28 +539,15 @@ def _qbo_post_json(realm_id: str, path: str, access_token: str, payload: dict) -
     except Exception as e:
         return {"error": True, "detail": str(e)}
 
-def _qbo_query(realm_id: str, access_token: str, q: str) -> dict:
-    # QBO query endpoint expects text/plain body
-    path = f"/v3/company/{realm_id}/query?minorversion=65"
-    url = f"{QBO_BASE}{path}"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json",
-        "Content-Type": "text/plain",
-    }
-    req = urllib.request.Request(url, data=q.encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads((resp.read().decode("utf-8") or "{}"))
-
 def _qbo_get_or_create_demo_item_id(realm_id: str, access_token: str) -> str:
     # 1) find existing “Receipt Item”
-    data = _qbo_query(realm_id, access_token, "select Id, Name from Item where Name = 'Receipt Item' maxresults 1")
+    data = _qbo_query(realm_id, "select Id, Name from Item where Name = 'Receipt Item' maxresults 1", access_token)
     items = (data.get("QueryResponse") or {}).get("Item") or []
     if items:
         return items[0]["Id"]
 
     # 2) find ANY Income account to attach item to
-    acct = _qbo_query(realm_id, access_token, "select Id, Name from Account where AccountType = 'Income' maxresults 1")
+    acct = _qbo_query(realm_id, "select Id, Name from Account where AccountType = 'Income' maxresults 1", access_token)
     accts = (acct.get("QueryResponse") or {}).get("Account") or []
     if not accts:
         raise Exception("No Income account found in QBO (sandbox). Create one Income account first.")
@@ -856,47 +867,9 @@ async def square_webhook(request: Request):
             },
         }
         transactions.append(tx)
-        # ---- AUTO POST TO QUICKBOOKS (DEMO, FROM DB OBJECT) ----
-   # ---- AUTO POST TO QUICKBOOKS (DEMO, FROM DB OBJECT) ----
-    if qbo_tokens and tx.get("items"):
-        try:
-            access_token = list(qbo_tokens.values())[0]["access_token"]
-            realm_id = list(qbo_tokens.keys())[0]
-
-            qbo_item_id = _qbo_get_or_create_item(access_token, realm_id)
-
-            line_items = []
-            for item in tx["items"]:
-                line_items.append({
-                    "DetailType": "SalesItemLineDetail",
-                    "Amount": item["unit_price"] * item["quantity"],
-                    "SalesItemLineDetail": {
-                        "Qty": item["quantity"],
-                        "UnitPrice": item["unit_price"],
-                        "ItemRef": {
-                            "name": item["name"],
-                            "value": qbo_item_id
-                        }
-                    }
-                })
-
-            payload = {
-                "Line": line_items,
-                "TotalAmt": tx["total"]
-            }
-
-            _qbo_post(
-                realm_id,
-                f"/v3/company/{realm_id}/salesreceipt",
-                access_token,
-                payload
-            )
-
-        except Exception as e:
-            print("QBO post failed:", e)
-
-    _db_write_tx(tx)
-    return {"ok": True, "created": True}
+        _db_write_tx(tx)
+        maybe_autopost_to_qbo_from_tx(tx)
+        return {"ok": True, "created": True}
 
 
     return {"ok": True, "ignored": True}
@@ -1049,4 +1022,3 @@ async def square_backfill(user_id: str = "demo_user", limit: int = 50):
 @app.get("/")
 async def root():
     return {"ok": True, "service": "receipts-ingestion"}
-
