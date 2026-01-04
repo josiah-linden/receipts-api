@@ -375,7 +375,13 @@ async def quickbooks_callback(code: str, realmId: str):
 # -------------------------
 # QuickBooks: read CompanyInfo (sanity check)
 # -------------------------
-QBO_BASE = "https://quickbooks.api.intuit.com"
+QBO_ENV = os.getenv("QBO_ENV", "sandbox").lower()  # "sandbox" or "production"
+
+QBO_BASE = (
+    "https://sandbox-quickbooks.api.intuit.com"
+    if QBO_ENV != "production"
+    else "https://quickbooks.api.intuit.com"
+)
 
 def _qbo_request(realm_id: str, path: str, access_token: str) -> dict:
     url = f"{QBO_BASE}{path}"
