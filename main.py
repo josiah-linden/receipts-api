@@ -490,6 +490,112 @@ QBO_REDIRECT_URI = os.getenv("QBO_REDIRECT_URI")
 QBO_ENV = os.getenv("QBO_ENV", "sandbox")  # "sandbox" or "production"
 
 qbo_tokens: Dict[str, dict] = {}
+# -------------------------
+# QuickBooks: minimal POST helpers (SalesReceipt)
+# -------------------------
+def _qbo_post_json(realm_id: str, path: str, access_token: str, payload: dict) -> dict:
+    url = f"{QBO_BASE}{path}"
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8") or "{}"
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        try:
+            err = e.read().decode("utf-8")
+        except Exception:
+            err = str(e)
+        return {"error": True, "status": e.code, "detail": err}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
+
+def _qbo_query(realm_id: str, access_token: str, q: str) -> dict:
+    # QBO query endpoint expects text/plain body
+    path = f"/v3/company/{realm_id}/query?minorversion=65"
+    url = f"{QBO_BASE}{path}"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "text/plain",
+    }
+    req = urllib.request.Request(url, data=q.encode("utf-8"), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads((resp.read().decode("utf-8") or "{}"))
+
+def _qbo_get_or_create_demo_item_id(realm_id: str, access_token: str) -> str:
+    # 1) find existing “Receipt Item”
+    data = _qbo_query(realm_id, access_token, "select Id, Name from Item where Name = 'Receipt Item' maxresults 1")
+    items = (data.get("QueryResponse") or {}).get("Item") or []
+    if items:
+        return items[0]["Id"]
+
+    # 2) find ANY Income account to attach item to
+    acct = _qbo_query(realm_id, access_token, "select Id, Name from Account where AccountType = 'Income' maxresults 1")
+    accts = (acct.get("QueryResponse") or {}).get("Account") or []
+    if not accts:
+        raise Exception("No Income account found in QBO (sandbox). Create one Income account first.")
+    income_acct_id = accts[0]["Id"]
+
+    # 3) create the item
+    payload = {
+        "Name": "Receipt Item",
+        "Type": "Service",
+        "IncomeAccountRef": {"value": income_acct_id},
+    }
+    created = _qbo_post_json(realm_id, f"/v3/company/{realm_id}/item?minorversion=65", access_token, payload)
+    if created.get("error"):
+        raise Exception(f"QBO item create failed: {created}")
+    return created["Item"]["Id"]
+
+def qbo_push_tx(tx: dict) -> dict:
+    if not tx or not tx.get("items"):
+        return {"ok": False, "detail": "No items"}
+
+    if not qbo_tokens:
+        return {"ok": False, "detail": "No QBO tokens in memory (run connect+exchange)"}
+
+    realm_id = list(qbo_tokens.keys())[0]
+    access_token = (qbo_tokens.get(realm_id) or {}).get("access_token")
+    if not access_token:
+        return {"ok": False, "detail": "Missing access_token (run exchange)"}
+
+    item_id = _qbo_get_or_create_demo_item_id(realm_id, access_token)
+
+    lines = []
+    for it in tx["items"]:
+        qty = float(it.get("quantity") or 1)
+        unit = float(it.get("unit_price") or 0)
+        lines.append({
+            "DetailType": "SalesItemLineDetail",
+            "Amount": round(qty * unit, 2),
+            "SalesItemLineDetail": {
+                "Qty": qty,
+                "UnitPrice": unit,
+                "ItemRef": {"value": item_id}
+            },
+            "Description": it.get("name") or "",
+        })
+
+    payload = {
+        "Line": lines,
+        "TotalAmt": float(tx.get("total") or 0),
+        "PrivateNote": f"{tx.get('merchant')} payment_id={tx.get('payment_id')}",
+    }
+
+    return _qbo_post_json(realm_id, f"/v3/company/{realm_id}/salesreceipt?minorversion=65", access_token, payload)
+
+@app.get("/api/quickbooks/status")
+async def quickbooks_status():
+    realm_id = list(qbo_tokens.keys())[0] if qbo_tokens else None
+    has_token = bool(realm_id and (qbo_tokens.get(realm_id) or {}).get("access_token"))
+    return {"ok": True, "realm_id": realm_id, "has_token": has_token}
+
 
 def _qbo_base_url() -> str:
     return "https://oauth.platform.intuit.com"  # token endpoint is same for sandbox/prod
