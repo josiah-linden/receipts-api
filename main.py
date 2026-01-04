@@ -434,7 +434,7 @@ def maybe_autopost_to_qbo_from_tx(tx: dict):
                 "UnitPrice": item["unit_price"],
                 "ItemRef": {
                     "name": item["name"],
-                    "value": "1"  # demo item
+                    "value": qbo_item_id  # demo item
                 }
             }
         })
@@ -515,6 +515,45 @@ async def quickbooks_exchange(code: str, realmId: str):
     tok = r.json()
     qbo_tokens[str(realmId)] = tok
     return {"ok": True, "realm_id": realmId}
+
+def _qbo_get_or_create_item(access_token: str, realm_id: str) -> str:
+    url = f"{_qbo_base_url()}/v3/company/{realm_id}/query"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/text",
+    }
+
+    # 1) Try to find existing demo item
+    query = "select * from Item where Name = 'Receipt Item'"
+    req = urllib.request.Request(url, data=query.encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(req) as r:
+        data = json.loads(r.read().decode())
+        items = data.get("QueryResponse", {}).get("Item", [])
+        if items:
+            return items[0]["Id"]
+
+    # 2) Create it if missing
+    create_url = f"{_qbo_base_url()}/v3/company/{realm_id}/item"
+    payload = {
+        "Name": "Receipt Item",
+        "Type": "NonInventory",
+        "IncomeAccountRef": {"value": qbo_item_id}
+    }
+
+    req = urllib.request.Request(
+        create_url,
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read().decode())["Item"]["Id"]
+
 
 # -------------------------
 # Stripe Webhook
@@ -705,6 +744,40 @@ async def square_webhook(request: Request):
             },
         }
         transactions.append(tx)
+        # ---- AUTO POST TO QUICKBOOKS (DEMO, FROM DB OBJECT) ----
+if qbo_tokens and tx.get("items"):
+    try:
+        access_token = list(qbo_tokens.values())[0]["access_token"]
+        realm_id = list(qbo_tokens.keys())[0]
+
+        qbo_item_id = _qbo_get_or_create_item(access_token, realm_id)
+
+        line_items = []
+        for item in tx["items"]:
+            line_items.append({
+                "DetailType": "SalesItemLineDetail",
+                "Amount": item["unit_price"] * item["quantity"],
+                "SalesItemLineDetail": {
+                    "Qty": item["quantity"],
+                    "UnitPrice": item["unit_price"],
+                    "ItemRef": {
+                        "name": item["name"],
+                        "value": qbo_item_id
+                    }
+                }
+            })
+
+        payload = {
+            "Line": line_items,
+            "TotalAmt": tx["total"]
+        }
+
+        qb_url = f"{_qbo_base_url()}/v3/company/{realm_id}/salesreceipt"
+        _qbo_post(qb_url, access_token, payload)
+
+    except Exception as e:
+        print("QBO post failed:", e)
+
         _db_write_tx(tx)
         maybe_autopost_to_qbo_from_tx(tx)
         return {"ok": True, "created": True}
