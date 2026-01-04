@@ -745,42 +745,46 @@ async def square_webhook(request: Request):
         }
         transactions.append(tx)
         # ---- AUTO POST TO QUICKBOOKS (DEMO, FROM DB OBJECT) ----
-if qbo_tokens and tx.get("items"):
-    try:
-        access_token = list(qbo_tokens.values())[0]["access_token"]
-        realm_id = list(qbo_tokens.keys())[0]
+   # ---- AUTO POST TO QUICKBOOKS (DEMO, FROM DB OBJECT) ----
+    if qbo_tokens and tx.get("items"):
+        try:
+            access_token = list(qbo_tokens.values())[0]["access_token"]
+            realm_id = list(qbo_tokens.keys())[0]
 
-        qbo_item_id = _qbo_get_or_create_item(access_token, realm_id)
+            qbo_item_id = _qbo_get_or_create_item(access_token, realm_id)
 
-        line_items = []
-        for item in tx["items"]:
-            line_items.append({
-                "DetailType": "SalesItemLineDetail",
-                "Amount": item["unit_price"] * item["quantity"],
-                "SalesItemLineDetail": {
-                    "Qty": item["quantity"],
-                    "UnitPrice": item["unit_price"],
-                    "ItemRef": {
-                        "name": item["name"],
-                        "value": qbo_item_id
+            line_items = []
+            for item in tx["items"]:
+                line_items.append({
+                    "DetailType": "SalesItemLineDetail",
+                    "Amount": item["unit_price"] * item["quantity"],
+                    "SalesItemLineDetail": {
+                        "Qty": item["quantity"],
+                        "UnitPrice": item["unit_price"],
+                        "ItemRef": {
+                            "name": item["name"],
+                            "value": qbo_item_id
+                        }
                     }
-                }
-            })
+                })
 
-        payload = {
-            "Line": line_items,
-            "TotalAmt": tx["total"]
-        }
+            payload = {
+                "Line": line_items,
+                "TotalAmt": tx["total"]
+            }
 
-        qb_url = f"{_qbo_base_url()}/v3/company/{realm_id}/salesreceipt"
-        _qbo_post(qb_url, access_token, payload)
+            _qbo_post(
+                realm_id,
+                f"/v3/company/{realm_id}/salesreceipt",
+                access_token,
+                payload
+            )
 
-    except Exception as e:
-        print("QBO post failed:", e)
+        except Exception as e:
+            print("QBO post failed:", e)
 
-        _db_write_tx(tx)
-        maybe_autopost_to_qbo_from_tx(tx)
-        return {"ok": True, "created": True}
+    _db_write_tx(tx)
+    return {"ok": True, "created": True}
 
 
     return {"ok": True, "ignored": True}
