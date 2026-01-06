@@ -1348,50 +1348,6 @@ async def square_backfill(user_id: str = "demo_user", limit: int = 50):
             _db_write_tx(t)
             updated += 1
 
-    if checked < limit:
-        conn = _db_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT payment_id, order_id, currency, total, MAX(ts) as ts
-            FROM receipt_items
-            WHERE user_id = ? AND merchant = 'square'
-            GROUP BY payment_id, order_id, currency, total
-            ORDER BY ts DESC
-            LIMIT ?
-            """,
-            (user_id, int(limit - checked)),
-        )
-        rows = cur.fetchall()
-        conn.close()
-
-        for payment_id, order_id, currency, total, ts in rows:
-            if not order_id:
-                continue
-            order_full = _square_get_order(order_id)
-            if not isinstance(order_full, dict):
-                continue
-            items = _order_to_items(order_full)
-            if not items:
-                continue
-            tx = {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "merchant": "square",
-                "payment_id": payment_id or "",
-                "timestamp": ts or int(time.time()),
-                "currency": currency or "",
-                "total": total or 0,
-                "items": items,
-                "meta": {
-                    "square_order_id": order_id,
-                    "square_order": order_full,
-                    "square_event_type": "backfill_db",
-                },
-            }
-            _db_write_tx(tx)
-            updated += 1
-
     return {"ok": True, "checked": checked, "updated": updated}
 
 @app.get("/")
