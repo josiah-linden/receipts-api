@@ -1144,6 +1144,45 @@ async def demo_receipts(
             }
         )
 
+    if SQUARE_ACCESS_TOKEN:
+        for key, items in list(grouped.items()):
+            ts, merchant_val, payment_val, order_val, currency, total = key
+            if merchant_val != "square" or not order_val:
+                continue
+            if not (len(items) == 1 and items[0].get("item_name") == "Receipt total"):
+                continue
+            order_full = _square_get_order(order_val)
+            if not isinstance(order_full, dict):
+                continue
+            refreshed_items = _order_to_items(order_full)
+            if not refreshed_items:
+                continue
+            tx = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "merchant": "square",
+                "payment_id": payment_val or "",
+                "timestamp": ts or int(time.time()),
+                "currency": currency or "",
+                "total": total or 0,
+                "items": refreshed_items,
+                "meta": {
+                    "square_order_id": order_val,
+                    "square_order": order_full,
+                    "square_event_type": "demo_refresh",
+                },
+            }
+            _db_write_tx(tx)
+            grouped[key] = [
+                {
+                    "item_name": it.get("name") or "",
+                    "sku": it.get("sku"),
+                    "quantity": it.get("quantity") or 0,
+                    "unit_price": it.get("unit_price") or 0,
+                }
+                for it in refreshed_items
+            ]
+
     html = f"""
 <!doctype html>
 <html>
