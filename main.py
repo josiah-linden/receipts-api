@@ -526,8 +526,10 @@ def maybe_autopost_to_qbo_from_tx(tx: dict):
 
     realm_id = list(qbo_tokens.keys())[0]
     access_token = qbo_tokens[realm_id]["access_token"]
-    item_id = _qbo_get_first_item_id(access_token, realm_id)
-    if not item_id:
+    try:
+        item_id = _qbo_get_or_create_demo_item_id(realm_id, access_token)
+    except Exception as exc:
+        print("QBO item lookup/create failed:", exc)
         return
 
     lines = []
