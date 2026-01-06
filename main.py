@@ -675,6 +675,25 @@ def qbo_push_tx(tx: dict) -> dict:
 
     return _qbo_post_json(realm_id, f"/v3/company/{realm_id}/salesreceipt?minorversion=65", access_token, payload)
 
+def _register_qbo_push_demo_routes() -> None:
+    qbo_push_path = os.path.join(os.path.dirname(__file__), "qbo_push")
+    if not os.path.isfile(qbo_push_path):
+        return
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("qbo_push", qbo_push_path)
+    if not spec or not spec.loader:
+        return
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    register_routes = getattr(module, "register_routes", None)
+    if callable(register_routes):
+        register_routes(app, _db_load_qbo_tokens, lambda: qbo_tokens, qbo_push_tx)
+
+_register_qbo_push_demo_routes()
+
 @app.get("/api/quickbooks/status")
 async def quickbooks_status():
     realm_id = list(qbo_tokens.keys())[0] if qbo_tokens else None
