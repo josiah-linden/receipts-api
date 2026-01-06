@@ -1,0 +1,22 @@
+import importlib.util
+import os
+from typing import Callable, Dict
+
+def register_routes(
+    app,
+    db_load_qbo_tokens: Callable[[], None],
+    get_qbo_tokens: Callable[[], Dict[str, dict]],
+    qbo_push_tx: Callable[[dict], dict],
+) -> None:
+    module_path = os.path.join(os.path.dirname(__file__), "qbo_push.py")
+    spec = importlib.util.spec_from_file_location("qbo_push_py", module_path)
+    if not spec or not spec.loader:
+        raise RuntimeError("qbo_push.py module not found")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    register = getattr(module, "register_routes", None)
+    if not callable(register):
+        raise RuntimeError("qbo_push.py is missing register_routes")
+
+    register(app, db_load_qbo_tokens, get_qbo_tokens, qbo_push_tx)

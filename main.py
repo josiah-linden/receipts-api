@@ -676,12 +676,9 @@ def qbo_push_tx(tx: dict) -> dict:
     return _qbo_post_json(realm_id, f"/v3/company/{realm_id}/salesreceipt?minorversion=65", access_token, payload)
 
 def _register_qbo_push_demo_routes() -> None:
-    base_dir = os.path.dirname(__file__)
-    qbo_push_path = os.path.join(base_dir, "qbo_push.py")
+    qbo_push_path = os.path.join(os.path.dirname(__file__), "qbo_push")
     if not os.path.isfile(qbo_push_path):
-        qbo_push_path = os.path.join(base_dir, "qbo_push")
-        if not os.path.isfile(qbo_push_path):
-            return
+        return
 
     import importlib.util
 
