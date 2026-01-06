@@ -178,6 +178,40 @@ def _db_write_tx(tx: dict):
     conn.commit()
     conn.close()
 
+def _db_load_square_tx_by_order_id(order_id: str) -> Optional[dict]:
+    if not order_id:
+        return None
+    conn = _db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_id, payment_id, currency, total, ts
+        FROM receipt_items
+        WHERE merchant = 'square' AND order_id = ?
+        ORDER BY ts DESC
+        LIMIT 1
+        """,
+        (order_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    user_id, payment_id, currency, total, ts = row
+    return {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id or "demo_user",
+        "merchant": "square",
+        "payment_id": payment_id or "",
+        "timestamp": ts or int(time.time()),
+        "currency": currency or "",
+        "total": total or 0,
+        "items": [],
+        "meta": {
+            "square_order_id": order_id,
+        },
+    }
+
 square_oauth_tokens: Dict[str, dict] = {}
 
 # -------------------------
@@ -946,6 +980,19 @@ async def square_webhook(request: Request):
                 _db_write_tx(t)
                 return {"ok": True, "updated_existing": True}
 
+        if order_full is not None:
+            db_tx = _db_load_square_tx_by_order_id(order_id)
+            if db_tx:
+                if items:
+                    db_tx["items"] = items
+                db_tx_meta = db_tx.get("meta") or {}
+                db_tx_meta["square_order"] = order_full
+                db_tx_meta["square_event_type"] = event_type
+                db_tx_meta["square_event_id"] = event_id
+                db_tx["meta"] = db_tx_meta
+                _db_write_tx(db_tx)
+                return {"ok": True, "updated_existing_db": True}
+
         return {"ok": True, "no_matching_tx": True}
 
     # Treat both payment.created and payment.updated as enrichment triggers
@@ -1259,6 +1306,51 @@ async def square_backfill(user_id: str = "demo_user", limit: int = 50):
                 t["items"] = items
             meta["square_order"] = order_full
             t["meta"] = meta
+            _db_write_tx(t)
+            updated += 1
+
+    if checked < limit:
+        conn = _db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT payment_id, order_id, currency, total, MAX(ts) as ts
+            FROM receipt_items
+            WHERE user_id = ? AND merchant = 'square'
+            GROUP BY payment_id, order_id, currency, total
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (user_id, int(limit - checked)),
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        for payment_id, order_id, currency, total, ts in rows:
+            if not order_id:
+                continue
+            order_full = _square_get_order(order_id)
+            if not isinstance(order_full, dict):
+                continue
+            items = _order_to_items(order_full)
+            if not items:
+                continue
+            tx = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "merchant": "square",
+                "payment_id": payment_id or "",
+                "timestamp": ts or int(time.time()),
+                "currency": currency or "",
+                "total": total or 0,
+                "items": items,
+                "meta": {
+                    "square_order_id": order_id,
+                    "square_order": order_full,
+                    "square_event_type": "backfill_db",
+                },
+            }
+            _db_write_tx(tx)
             updated += 1
 
     return {"ok": True, "checked": checked, "updated": updated}
