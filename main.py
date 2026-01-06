@@ -145,10 +145,10 @@ def _db_write_tx(tx: dict):
     if not isinstance(items, list):
         items = []
 
-    # If there are no items, still store a "header-ish" row so you can see the receipt exists.
+    # If there are no items, store a single summary line so receipts are still visible.
     # (We'll overwrite it later once items arrive.)
     if not items:
-        items = [{"sku": None, "name": "(no items yet)", "quantity": 0, "unit_price": 0}]
+        items = [{"sku": None, "name": "Receipt total", "quantity": 1, "unit_price": float(total)}]
 
     conn = _db_conn()
     cur = conn.cursor()
@@ -268,6 +268,37 @@ def _square_get_catalog_object(object_id: str) -> Optional[dict]:
         return resp.get("object")
     return None
 
+def _square_resolve_catalog_fields(catalog_object_id: Optional[str]) -> Dict[str, Optional[str]]:
+    if not catalog_object_id:
+        return {"name": None, "sku": None}
+
+    obj = _square_get_catalog_object(catalog_object_id)
+    if not isinstance(obj, dict):
+        return {"name": None, "sku": None}
+
+    obj_type = obj.get("type")
+    if obj_type == "ITEM":
+        item_data = obj.get("item_data") or {}
+        return {"name": item_data.get("name"), "sku": None}
+
+    if obj_type == "ITEM_VARIATION":
+        variation_data = obj.get("item_variation_data") or {}
+        name = variation_data.get("name")
+        sku = variation_data.get("sku")
+        item_id = variation_data.get("item_id")
+        if item_id:
+            item_obj = _square_get_catalog_object(item_id)
+            if isinstance(item_obj, dict):
+                item_data = item_obj.get("item_data") or {}
+                item_name = item_data.get("name")
+                if item_name and name:
+                    name = f"{item_name} - {name}"
+                elif item_name:
+                    name = item_name
+        return {"name": name, "sku": sku}
+
+    return {"name": None, "sku": None}
+
 def _order_to_items(order: dict) -> List[dict]:
     """
     Convert Square Order object to our items format:
@@ -293,11 +324,10 @@ def _order_to_items(order: dict) -> List[dict]:
             # SKU resolution (best-effort)
             sku = li.get("sku") or None
             catalog_object_id = li.get("catalog_object_id") or li.get("variation_id")
-            if not sku and catalog_object_id:
-                obj = _square_get_catalog_object(catalog_object_id)
-                if isinstance(obj, dict):
-                    item_data = (obj.get("item_variation_data") or {})
-                    sku = item_data.get("sku") or sku
+            if catalog_object_id and (not sku or not name):
+                resolved = _square_resolve_catalog_fields(catalog_object_id)
+                sku = sku or resolved.get("sku")
+                name = name or (resolved.get("name") or "")
 
             items.append(
                 {
@@ -333,11 +363,10 @@ def _order_to_items(order: dict) -> List[dict]:
                 sku = li.get("sku") or None
 
                 catalog_object_id = li.get("catalog_object_id") or li.get("variation_id")
-                if not sku and catalog_object_id:
-                    obj = _square_get_catalog_object(catalog_object_id)
-                    if isinstance(obj, dict):
-                        item_data = (obj.get("item_variation_data") or {})
-                        sku = item_data.get("sku") or sku
+                if catalog_object_id and (not sku or not name):
+                    resolved = _square_resolve_catalog_fields(catalog_object_id)
+                    sku = sku or resolved.get("sku")
+                    name = name or (resolved.get("name") or "")
 
                 items.append(
                     {
@@ -914,6 +943,7 @@ async def square_webhook(request: Request):
                 meta["square_event_type"] = event_type
                 meta["square_event_id"] = event_id
                 t["meta"] = meta
+                _db_write_tx(t)
                 return {"ok": True, "updated_existing": True}
 
         return {"ok": True, "no_matching_tx": True}
@@ -980,22 +1010,67 @@ async def square_webhook(request: Request):
 from fastapi.responses import HTMLResponse
 
 @app.get("/demo/receipts", response_class=HTMLResponse)
-async def demo_receipts(user_id: str = "demo_user", limit: int = 200):
+async def demo_receipts(
+    user_id: str = "demo_user",
+    limit: int = 200,
+    merchant: Optional[str] = None,
+    payment_id: Optional[str] = None,
+    order_id: Optional[str] = None,
+    item: Optional[str] = None,
+    sku: Optional[str] = None,
+    start_ts: Optional[int] = None,
+    end_ts: Optional[int] = None,
+    min_total: Optional[float] = None,
+    max_total: Optional[float] = None,
+):
     """
-    Simple demo UI: renders receipt_items as an HTML table (spreadsheet vibe).
+    Simple demo UI: shows receipts with filters and grouped line items.
     """
+    where = ["user_id = ?"]
+    params: List[object] = [user_id]
+
+    if merchant:
+        where.append("merchant = ?")
+        params.append(merchant)
+    if payment_id:
+        where.append("payment_id LIKE ?")
+        params.append(f"%{payment_id}%")
+    if order_id:
+        where.append("order_id LIKE ?")
+        params.append(f"%{order_id}%")
+    if item:
+        where.append("item_name LIKE ?")
+        params.append(f"%{item}%")
+    if sku:
+        where.append("sku LIKE ?")
+        params.append(f"%{sku}%")
+    if start_ts is not None:
+        where.append("ts >= ?")
+        params.append(int(start_ts))
+    if end_ts is not None:
+        where.append("ts <= ?")
+        params.append(int(end_ts))
+    if min_total is not None:
+        where.append("total >= ?")
+        params.append(float(min_total))
+    if max_total is not None:
+        where.append("total <= ?")
+        params.append(float(max_total))
+
+    where_clause = " AND ".join(where) if where else "1=1"
+
     conn = _db_conn()
     cur = conn.cursor()
     cur.execute(
-        """
+        f"""
         SELECT
           ts, merchant, payment_id, order_id, item_name, sku, quantity, unit_price, currency, total
         FROM receipt_items
-        WHERE user_id=?
+        WHERE {where_clause}
         ORDER BY ts DESC
         LIMIT ?
         """,
-        (user_id, int(limit)),
+        (*params, int(limit)),
     )
     rows = cur.fetchall()
     conn.close()
@@ -1009,66 +1084,132 @@ async def demo_receipts(user_id: str = "demo_user", limit: int = 200):
              .replace('"', "&quot;")
         )
 
-    html = """
+    grouped: Dict[tuple, List[dict]] = {}
+    for r in rows:
+        ts, merchant_val, payment_val, order_val, item_name, sku_val, qty, unit_price, currency, total = r
+        key = (ts, merchant_val, payment_val, order_val, currency, total)
+        grouped.setdefault(key, []).append(
+            {
+                "item_name": item_name,
+                "sku": sku_val,
+                "quantity": qty,
+                "unit_price": unit_price,
+            }
+        )
+
+    html = f"""
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Receipts Demo</title>
+  <title>Receipts</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; background:#0b0b0d; color:#f3f4f6;}
-    .wrap{max-width:1200px; margin:0 auto;}
-    h1{margin:0 0 8px 0; font-size:18px;}
-    .sub{opacity:.8; margin-bottom:12px; font-size:13px;}
-    table{width:100%; border-collapse:collapse; background:#111114; border:1px solid #222; border-radius:10px; overflow:hidden;}
-    th,td{padding:10px 8px; border-bottom:1px solid #1f1f24; font-size:12px; vertical-align:top;}
-    th{position:sticky; top:0; background:#14141a; text-align:left; font-weight:600;}
-    tr:hover td{background:#12121a;}
-    .pill{display:inline-block; padding:2px 8px; border:1px solid #2b2b35; border-radius:999px; font-size:11px; opacity:.9;}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;}
-    .right{text-align:right;}
+    body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; background:#0b0b0d; color:#f3f4f6;}}
+    .wrap{{max-width:1200px; margin:0 auto;}}
+    h1{{margin:0 0 6px 0; font-size:20px;}}
+    .sub{{opacity:.75; margin-bottom:16px; font-size:13px;}}
+    .panel{{background:#111114; border:1px solid #222; border-radius:12px; padding:16px; margin-bottom:16px;}}
+    .grid{{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px;}}
+    label{{display:block; font-size:12px; opacity:.75; margin-bottom:6px;}}
+    input,select{{width:100%; background:#0c0c11; border:1px solid #23232a; border-radius:8px; color:#f3f4f6; padding:8px 10px; font-size:12px;}}
+    button{{background:#2563eb; border:none; border-radius:8px; color:white; padding:10px 14px; font-size:13px; font-weight:600; cursor:pointer;}}
+    .pill{{display:inline-block; padding:2px 8px; border:1px solid #2b2b35; border-radius:999px; font-size:11px; opacity:.9;}}
+    .mono{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;}}
+    .cards{{display:flex; flex-direction:column; gap:12px;}}
+    .card{{background:#111114; border:1px solid #222; border-radius:12px; padding:14px;}}
+    .row{{display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center;}}
+    .meta{{font-size:12px; opacity:.8;}}
+    .items{{margin-top:10px; border-top:1px solid #1f1f24; padding-top:10px;}}
+    .item{{display:flex; justify-content:space-between; font-size:12px; padding:4px 0;}}
+    .right{{text-align:right;}}
+    .empty{{padding:24px; text-align:center; opacity:.75;}}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Receipts (demo table)</h1>
-    <div class="sub">URL params: <span class="mono">?user_id=demo_user&limit=200</span></div>
-    <table>
-      <thead>
-        <tr>
-          <th>ts</th>
-          <th>merchant</th>
-          <th>payment_id</th>
-          <th>order_id</th>
-          <th>item</th>
-          <th>sku</th>
-          <th class="right">qty</th>
-          <th class="right">unit</th>
-          <th>currency</th>
-          <th class="right">total</th>
-        </tr>
-      </thead>
-      <tbody>
+    <h1>Receipts</h1>
+    <div class="sub">Filter and search stored receipts. Results are pulled from the permanent database.</div>
+    <form class="panel" method="get">
+      <div class="grid">
+        <div>
+          <label>User ID</label>
+          <input name="user_id" value="{esc(user_id)}" />
+        </div>
+        <div>
+          <label>Merchant</label>
+          <input name="merchant" value="{esc(merchant)}" placeholder="square" />
+        </div>
+        <div>
+          <label>Payment ID</label>
+          <input name="payment_id" value="{esc(payment_id)}" placeholder="search" />
+        </div>
+        <div>
+          <label>Order ID</label>
+          <input name="order_id" value="{esc(order_id)}" placeholder="search" />
+        </div>
+        <div>
+          <label>Item</label>
+          <input name="item" value="{esc(item)}" placeholder="item name" />
+        </div>
+        <div>
+          <label>SKU</label>
+          <input name="sku" value="{esc(sku)}" placeholder="sku" />
+        </div>
+        <div>
+          <label>Start (unix ts)</label>
+          <input name="start_ts" value="{esc(start_ts)}" placeholder="1700000000" />
+        </div>
+        <div>
+          <label>End (unix ts)</label>
+          <input name="end_ts" value="{esc(end_ts)}" placeholder="1709999999" />
+        </div>
+        <div>
+          <label>Min total</label>
+          <input name="min_total" value="{esc(min_total)}" placeholder="0.00" />
+        </div>
+        <div>
+          <label>Max total</label>
+          <input name="max_total" value="{esc(max_total)}" placeholder="100.00" />
+        </div>
+        <div>
+          <label>Limit</label>
+          <input name="limit" value="{esc(limit)}" />
+        </div>
+        <div style="display:flex; align-items:end;">
+          <button type="submit">Search receipts</button>
+        </div>
+      </div>
+    </form>
+    <div class="cards">
 """
-    for r in rows:
-        ts, merchant, payment_id, order_id, item_name, sku, qty, unit_price, currency, total = r
-        html += "<tr>"
-        html += f"<td class='mono'>{esc(ts)}</td>"
-        html += f"<td><span class='pill'>{esc(merchant)}</span></td>"
-        html += f"<td class='mono'>{esc(payment_id)}</td>"
-        html += f"<td class='mono'>{esc(order_id)}</td>"
-        html += f"<td>{esc(item_name)}</td>"
-        html += f"<td class='mono'>{esc(sku)}</td>"
-        html += f"<td class='right'>{esc(qty)}</td>"
-        html += f"<td class='right'>{esc(unit_price)}</td>"
-        html += f"<td class='mono'>{esc(currency)}</td>"
-        html += f"<td class='right'>{esc(total)}</td>"
-        html += "</tr>"
+
+    if not grouped:
+        html += "<div class='panel empty'>No receipts found for this search.</div>"
+    else:
+        for key, items in grouped.items():
+            ts, merchant_val, payment_val, order_val, currency, total = key
+            html += "<div class='card'>"
+            html += "<div class='row'>"
+            html += f"<span class='pill'>{esc(merchant_val)}</span>"
+            html += f"<span class='meta'>Total: <strong>{esc(currency)} {esc(total)}</strong></span>"
+            html += f"<span class='meta'>Timestamp: <span class='mono'>{esc(ts)}</span></span>"
+            html += "</div>"
+            html += "<div class='row meta' style='margin-top:6px;'>"
+            html += f"<div>Payment ID: <span class='mono'>{esc(payment_val)}</span></div>"
+            html += f"<div>Order ID: <span class='mono'>{esc(order_val)}</span></div>"
+            html += "</div>"
+            html += "<div class='items'>"
+            for item_row in items:
+                html += "<div class='item'>"
+                html += f"<div>{esc(item_row['item_name'])} <span class='mono'>{esc(item_row['sku'])}</span></div>"
+                html += f"<div class='right'>{esc(item_row['quantity'])} × {esc(item_row['unit_price'])}</div>"
+                html += "</div>"
+            html += "</div>"
+            html += "</div>"
 
     html += """
-      </tbody>
-    </table>
+    </div>
   </div>
 </body>
 </html>
