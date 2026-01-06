@@ -178,6 +178,40 @@ def _db_write_tx(tx: dict):
     conn.commit()
     conn.close()
 
+def _db_load_square_tx_by_order_id(order_id: str) -> Optional[dict]:
+    if not order_id:
+        return None
+    conn = _db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_id, payment_id, currency, total, ts
+        FROM receipt_items
+        WHERE merchant = 'square' AND order_id = ?
+        ORDER BY ts DESC
+        LIMIT 1
+        """,
+        (order_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    user_id, payment_id, currency, total, ts = row
+    return {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id or "demo_user",
+        "merchant": "square",
+        "payment_id": payment_id or "",
+        "timestamp": ts or int(time.time()),
+        "currency": currency or "",
+        "total": total or 0,
+        "items": [],
+        "meta": {
+            "square_order_id": order_id,
+        },
+    }
+
 square_oauth_tokens: Dict[str, dict] = {}
 
 # -------------------------
@@ -946,6 +980,19 @@ async def square_webhook(request: Request):
                 _db_write_tx(t)
                 return {"ok": True, "updated_existing": True}
 
+        if order_full is not None:
+            db_tx = _db_load_square_tx_by_order_id(order_id)
+            if db_tx:
+                if items:
+                    db_tx["items"] = items
+                db_tx_meta = db_tx.get("meta") or {}
+                db_tx_meta["square_order"] = order_full
+                db_tx_meta["square_event_type"] = event_type
+                db_tx_meta["square_event_id"] = event_id
+                db_tx["meta"] = db_tx_meta
+                _db_write_tx(db_tx)
+                return {"ok": True, "updated_existing_db": True}
+
         return {"ok": True, "no_matching_tx": True}
 
     # Treat both payment.created and payment.updated as enrichment triggers
@@ -1096,6 +1143,45 @@ async def demo_receipts(
                 "unit_price": unit_price,
             }
         )
+
+    if SQUARE_ACCESS_TOKEN:
+        for key, items in list(grouped.items()):
+            ts, merchant_val, payment_val, order_val, currency, total = key
+            if merchant_val != "square" or not order_val:
+                continue
+            if not (len(items) == 1 and items[0].get("item_name") == "Receipt total"):
+                continue
+            order_full = _square_get_order(order_val)
+            if not isinstance(order_full, dict):
+                continue
+            refreshed_items = _order_to_items(order_full)
+            if not refreshed_items:
+                continue
+            tx = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "merchant": "square",
+                "payment_id": payment_val or "",
+                "timestamp": ts or int(time.time()),
+                "currency": currency or "",
+                "total": total or 0,
+                "items": refreshed_items,
+                "meta": {
+                    "square_order_id": order_val,
+                    "square_order": order_full,
+                    "square_event_type": "demo_refresh",
+                },
+            }
+            _db_write_tx(tx)
+            grouped[key] = [
+                {
+                    "item_name": it.get("name") or "",
+                    "sku": it.get("sku"),
+                    "quantity": it.get("quantity") or 0,
+                    "unit_price": it.get("unit_price") or 0,
+                }
+                for it in refreshed_items
+            ]
 
     html = f"""
 <!doctype html>
