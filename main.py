@@ -268,6 +268,37 @@ def _square_get_catalog_object(object_id: str) -> Optional[dict]:
         return resp.get("object")
     return None
 
+def _square_resolve_catalog_fields(catalog_object_id: Optional[str]) -> Dict[str, Optional[str]]:
+    if not catalog_object_id:
+        return {"name": None, "sku": None}
+
+    obj = _square_get_catalog_object(catalog_object_id)
+    if not isinstance(obj, dict):
+        return {"name": None, "sku": None}
+
+    obj_type = obj.get("type")
+    if obj_type == "ITEM":
+        item_data = obj.get("item_data") or {}
+        return {"name": item_data.get("name"), "sku": None}
+
+    if obj_type == "ITEM_VARIATION":
+        variation_data = obj.get("item_variation_data") or {}
+        name = variation_data.get("name")
+        sku = variation_data.get("sku")
+        item_id = variation_data.get("item_id")
+        if item_id:
+            item_obj = _square_get_catalog_object(item_id)
+            if isinstance(item_obj, dict):
+                item_data = item_obj.get("item_data") or {}
+                item_name = item_data.get("name")
+                if item_name and name:
+                    name = f"{item_name} - {name}"
+                elif item_name:
+                    name = item_name
+        return {"name": name, "sku": sku}
+
+    return {"name": None, "sku": None}
+
 def _order_to_items(order: dict) -> List[dict]:
     """
     Convert Square Order object to our items format:
@@ -293,11 +324,10 @@ def _order_to_items(order: dict) -> List[dict]:
             # SKU resolution (best-effort)
             sku = li.get("sku") or None
             catalog_object_id = li.get("catalog_object_id") or li.get("variation_id")
-            if not sku and catalog_object_id:
-                obj = _square_get_catalog_object(catalog_object_id)
-                if isinstance(obj, dict):
-                    item_data = (obj.get("item_variation_data") or {})
-                    sku = item_data.get("sku") or sku
+            if catalog_object_id and (not sku or not name):
+                resolved = _square_resolve_catalog_fields(catalog_object_id)
+                sku = sku or resolved.get("sku")
+                name = name or (resolved.get("name") or "")
 
             items.append(
                 {
@@ -333,11 +363,10 @@ def _order_to_items(order: dict) -> List[dict]:
                 sku = li.get("sku") or None
 
                 catalog_object_id = li.get("catalog_object_id") or li.get("variation_id")
-                if not sku and catalog_object_id:
-                    obj = _square_get_catalog_object(catalog_object_id)
-                    if isinstance(obj, dict):
-                        item_data = (obj.get("item_variation_data") or {})
-                        sku = item_data.get("sku") or sku
+                if catalog_object_id and (not sku or not name):
+                    resolved = _square_resolve_catalog_fields(catalog_object_id)
+                    sku = sku or resolved.get("sku")
+                    name = name or (resolved.get("name") or "")
 
                 items.append(
                     {
@@ -914,6 +943,7 @@ async def square_webhook(request: Request):
                 meta["square_event_type"] = event_type
                 meta["square_event_id"] = event_id
                 t["meta"] = meta
+                _db_write_tx(t)
                 return {"ok": True, "updated_existing": True}
 
         return {"ok": True, "no_matching_tx": True}
