@@ -498,7 +498,7 @@ def _qbo_post(realm_id: str, path: str, access_token: str, payload: dict) -> dic
         return {"error": True, "detail": str(e)}
 
 def _qbo_query(realm_id: str, query: str, access_token: str) -> dict:
-    url = f"https://quickbooks.api.intuit.com/v3/company/{realm_id}/query?minorversion=65"
+    url = f"{QBO_BASE}/v3/company/{realm_id}/query?minorversion=65"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
