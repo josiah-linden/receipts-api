@@ -443,11 +443,7 @@ def quickbooks_connect():
 
 @app.get("/api/quickbooks/callback")
 async def quickbooks_callback(code: str, realmId: str):
-    return {
-        "ok": True,
-        "code": code,
-        "realm_id": realmId
-    }
+    return _qbo_exchange_and_store(code, realmId)
 
 # -------------------------
 # QuickBooks: read CompanyInfo (sanity check)
@@ -687,8 +683,7 @@ async def quickbooks_status():
 def _qbo_base_url() -> str:
     return "https://oauth.platform.intuit.com"  # token endpoint is same for sandbox/prod
 
-@app.get("/api/quickbooks/exchange")
-async def quickbooks_exchange(code: str, realmId: str):
+def _qbo_exchange_and_store(code: str, realm_id: str) -> dict:
     if not QBO_CLIENT_ID or not QBO_CLIENT_SECRET or not QBO_REDIRECT_URI:
         raise HTTPException(status_code=500, detail="Missing QBO env vars")
 
@@ -718,9 +713,13 @@ async def quickbooks_exchange(code: str, realmId: str):
             tok["expires_at"] = int(time.time()) + int(expires_in)
         except (TypeError, ValueError):
             pass
-    qbo_tokens[str(realmId)] = tok
-    _db_save_qbo_token(realmId, tok)
-    return {"ok": True, "realm_id": realmId}
+    qbo_tokens[str(realm_id)] = tok
+    _db_save_qbo_token(realm_id, tok)
+    return {"ok": True, "realm_id": realm_id}
+
+@app.get("/api/quickbooks/exchange")
+async def quickbooks_exchange(code: str, realmId: str):
+    return _qbo_exchange_and_store(code, realmId)
 
 def _qbo_get_or_create_item(access_token: str, realm_id: str) -> str:
     url = f"{_qbo_base_url()}/v3/company/{realm_id}/query"
