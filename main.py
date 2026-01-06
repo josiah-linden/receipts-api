@@ -1259,6 +1259,7 @@ async def square_backfill(user_id: str = "demo_user", limit: int = 50):
                 t["items"] = items
             meta["square_order"] = order_full
             t["meta"] = meta
+            _db_write_tx(t)
             updated += 1
 
     return {"ok": True, "checked": checked, "updated": updated}
