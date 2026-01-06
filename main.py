@@ -1075,25 +1075,25 @@ async def demo_receipts(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Receipts</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; background:#0b0b0d; color:#f3f4f6;}
-    .wrap{max-width:1200px; margin:0 auto;}
-    h1{margin:0 0 6px 0; font-size:20px;}
-    .sub{opacity:.75; margin-bottom:16px; font-size:13px;}
-    .panel{background:#111114; border:1px solid #222; border-radius:12px; padding:16px; margin-bottom:16px;}
-    .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px;}
-    label{display:block; font-size:12px; opacity:.75; margin-bottom:6px;}
-    input,select{width:100%; background:#0c0c11; border:1px solid #23232a; border-radius:8px; color:#f3f4f6; padding:8px 10px; font-size:12px;}
-    button{background:#2563eb; border:none; border-radius:8px; color:white; padding:10px 14px; font-size:13px; font-weight:600; cursor:pointer;}
-    .pill{display:inline-block; padding:2px 8px; border:1px solid #2b2b35; border-radius:999px; font-size:11px; opacity:.9;}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;}
-    .cards{display:flex; flex-direction:column; gap:12px;}
-    .card{background:#111114; border:1px solid #222; border-radius:12px; padding:14px;}
-    .row{display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center;}
-    .meta{font-size:12px; opacity:.8;}
-    .items{margin-top:10px; border-top:1px solid #1f1f24; padding-top:10px;}
-    .item{display:flex; justify-content:space-between; font-size:12px; padding:4px 0;}
-    .right{text-align:right;}
-    .empty{padding:24px; text-align:center; opacity:.75;}
+    body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; background:#0b0b0d; color:#f3f4f6;}}
+    .wrap{{max-width:1200px; margin:0 auto;}}
+    h1{{margin:0 0 6px 0; font-size:20px;}}
+    .sub{{opacity:.75; margin-bottom:16px; font-size:13px;}}
+    .panel{{background:#111114; border:1px solid #222; border-radius:12px; padding:16px; margin-bottom:16px;}}
+    .grid{{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px;}}
+    label{{display:block; font-size:12px; opacity:.75; margin-bottom:6px;}}
+    input,select{{width:100%; background:#0c0c11; border:1px solid #23232a; border-radius:8px; color:#f3f4f6; padding:8px 10px; font-size:12px;}}
+    button{{background:#2563eb; border:none; border-radius:8px; color:white; padding:10px 14px; font-size:13px; font-weight:600; cursor:pointer;}}
+    .pill{{display:inline-block; padding:2px 8px; border:1px solid #2b2b35; border-radius:999px; font-size:11px; opacity:.9;}}
+    .mono{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;}}
+    .cards{{display:flex; flex-direction:column; gap:12px;}}
+    .card{{background:#111114; border:1px solid #222; border-radius:12px; padding:14px;}}
+    .row{{display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center;}}
+    .meta{{font-size:12px; opacity:.8;}}
+    .items{{margin-top:10px; border-top:1px solid #1f1f24; padding-top:10px;}}
+    .item{{display:flex; justify-content:space-between; font-size:12px; padding:4px 0;}}
+    .right{{text-align:right;}}
+    .empty{{padding:24px; text-align:center; opacity:.75;}}
   </style>
 </head>
 <body>
