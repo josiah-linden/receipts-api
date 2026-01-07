@@ -11,6 +11,8 @@ import urllib.request
 import sqlite3
 from typing import List, Optional, Dict
 from urllib.parse import urlencode
+import requests
+from requests.auth import HTTPBasicAuth
 
 app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 
@@ -602,6 +604,9 @@ QBO_BASE = (
     if QBO_ENV != "production"
     else "https://quickbooks.api.intuit.com"
 )
+QBO_CLIENT_ID = os.getenv("QBO_CLIENT_ID")
+QBO_CLIENT_SECRET = os.getenv("QBO_CLIENT_SECRET")
+QBO_REDIRECT_URI = os.getenv("QBO_REDIRECT_URI")
 
 def _qbo_request(realm_id: str, path: str, access_token: str) -> dict:
     url = f"{QBO_BASE}{path}"
@@ -649,15 +654,82 @@ def _qbo_query(realm_id: str, query: str, access_token: str) -> dict:
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
-        "Content-Type": "text/plain",
+        "Content-Type": "application/text",
     }
     req = urllib.request.Request(url, data=query.encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = resp.read().decode("utf-8") or "{}"
-        return json.loads(raw)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8") or "{}"
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        try:
+            err = e.read().decode("utf-8")
+        except Exception:
+            err = str(e)
+        return {"error": True, "status": e.code, "detail": err}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
+
+def _qbo_refresh_access_token(realm_id: str, refresh_token: str) -> dict:
+    if not refresh_token:
+        return {"error": True, "detail": "Missing refresh token"}
+
+    token_url = f"{_qbo_base_url()}/oauth2/v1/tokens/bearer"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+
+    r = requests.post(
+        token_url,
+        data=data,
+        headers={"Accept": "application/json"},
+        auth=HTTPBasicAuth(QBO_CLIENT_ID, QBO_CLIENT_SECRET),
+        timeout=20,
+    )
+
+    if r.status_code >= 400:
+        return {"error": True, "status": r.status_code, "detail": r.text}
+
+    tok = r.json()
+    expires_in = tok.get("expires_in")
+    if expires_in:
+        try:
+            tok["expires_at"] = int(time.time()) + int(expires_in)
+        except (TypeError, ValueError):
+            pass
+
+    existing = qbo_tokens.get(str(realm_id)) or {}
+    merged = {**existing, **tok}
+    qbo_tokens[str(realm_id)] = merged
+    _db_save_qbo_token(str(realm_id), merged)
+    return merged
+
+def _qbo_get_valid_access_token(realm_id: str) -> str:
+    tok = qbo_tokens.get(str(realm_id)) or {}
+    access_token = tok.get("access_token")
+    refresh_token = tok.get("refresh_token")
+    expires_at = tok.get("expires_at")
+
+    if refresh_token and (not access_token or (expires_at and time.time() >= int(expires_at) - 60)):
+        refreshed = _qbo_refresh_access_token(realm_id, refresh_token)
+        if not refreshed.get("error"):
+            return refreshed.get("access_token") or ""
+    return access_token or ""
+
+def _qbo_query_with_refresh(realm_id: str, query: str, access_token: str) -> dict:
+    data = _qbo_query(realm_id, query, access_token)
+    if data.get("status") == 401:
+        refresh_token = (qbo_tokens.get(str(realm_id)) or {}).get("refresh_token")
+        if refresh_token:
+            refreshed = _qbo_refresh_access_token(realm_id, refresh_token)
+            new_access_token = refreshed.get("access_token")
+            if new_access_token:
+                return _qbo_query(realm_id, query, new_access_token)
+    return data
 
 def _qbo_get_first_item_id(access_token: str, realm_id: str) -> Optional[str]:
-    data = _qbo_query(realm_id, "select Id, Name from Item maxresults 1", access_token)
+    data = _qbo_query_with_refresh(realm_id, "SELECT Id, Name FROM Item MAXRESULTS 1", access_token)
     items = (data.get("QueryResponse") or {}).get("Item") or []
     if items:
         return items[0].get("Id")
@@ -668,7 +740,10 @@ def maybe_autopost_to_qbo_from_tx(tx: dict):
         return
 
     realm_id = list(qbo_tokens.keys())[0]
-    access_token = qbo_tokens[realm_id]["access_token"]
+    access_token = _qbo_get_valid_access_token(realm_id)
+    if not access_token:
+        print("QBO access token missing; reconnect required.")
+        return
     try:
         item_id = _qbo_get_or_create_demo_item_id(realm_id, access_token)
     except Exception as exc:
@@ -727,14 +802,6 @@ async def quickbooks_companyinfo(realm_id: str):
 
     return data
 
-import requests
-from requests.auth import HTTPBasicAuth
-
-QBO_CLIENT_ID = os.getenv("QBO_CLIENT_ID")
-QBO_CLIENT_SECRET = os.getenv("QBO_CLIENT_SECRET")
-QBO_REDIRECT_URI = os.getenv("QBO_REDIRECT_URI")
-QBO_ENV = os.getenv("QBO_ENV", "sandbox")  # "sandbox" or "production"
-
 # -------------------------
 # QuickBooks: minimal POST helpers (SalesReceipt)
 # -------------------------
@@ -762,13 +829,17 @@ def _qbo_post_json(realm_id: str, path: str, access_token: str, payload: dict) -
 
 def _qbo_get_or_create_demo_item_id(realm_id: str, access_token: str) -> str:
     # 1) find existing “Receipt Item”
-    data = _qbo_query(realm_id, "select Id, Name from Item where Name = 'Receipt Item' maxresults 1", access_token)
+    data = _qbo_query_with_refresh(realm_id, "SELECT Id, Name FROM Item WHERE Name = 'Receipt Item' MAXRESULTS 1", access_token)
+    if data.get("error"):
+        raise RuntimeError(f"QBO query failed: {data}")
     items = (data.get("QueryResponse") or {}).get("Item") or []
     if items:
         return items[0]["Id"]
 
     # 2) find ANY Income account to attach item to
-    acct = _qbo_query(realm_id, "select Id, Name from Account where AccountType = 'Income' maxresults 1", access_token)
+    acct = _qbo_query_with_refresh(realm_id, "SELECT Id, Name FROM Account WHERE AccountType = 'Income' MAXRESULTS 1", access_token)
+    if acct.get("error"):
+        raise RuntimeError(f"QBO account lookup failed: {acct}")
     accts = (acct.get("QueryResponse") or {}).get("Account") or []
     if not accts:
         raise Exception("No Income account found in QBO (sandbox). Create one Income account first.")
@@ -793,11 +864,15 @@ def qbo_push_tx(tx: dict) -> dict:
         return {"ok": False, "detail": "No QBO tokens in memory (run connect+exchange)"}
 
     realm_id = list(qbo_tokens.keys())[0]
-    access_token = (qbo_tokens.get(realm_id) or {}).get("access_token")
+    access_token = _qbo_get_valid_access_token(realm_id)
     if not access_token:
         return {"ok": False, "detail": "Missing access_token (run exchange)"}
 
-    item_id = _qbo_get_or_create_demo_item_id(realm_id, access_token)
+    try:
+        item_id = _qbo_get_or_create_demo_item_id(realm_id, access_token)
+    except Exception as exc:
+        detail = str(exc) or "QBO item lookup/create failed"
+        return {"ok": False, "detail": detail}
 
     lines = []
     for it in tx["items"]:
@@ -820,10 +895,20 @@ def qbo_push_tx(tx: dict) -> dict:
         "PrivateNote": f"{tx.get('merchant')} payment_id={tx.get('payment_id')}",
     }
 
-    return _qbo_post_json(realm_id, f"/v3/company/{realm_id}/salesreceipt?minorversion=65", access_token, payload)
+    response = _qbo_post_json(realm_id, f"/v3/company/{realm_id}/salesreceipt?minorversion=65", access_token, payload)
+    if response.get("status") == 401:
+        refreshed_access = _qbo_get_valid_access_token(realm_id)
+        if refreshed_access and refreshed_access != access_token:
+            response = _qbo_post_json(
+                realm_id,
+                f"/v3/company/{realm_id}/salesreceipt?minorversion=65",
+                refreshed_access,
+                payload,
+            )
+    return response
 
 def _register_qbo_push_demo_routes() -> None:
-    qbo_push_path = os.path.join(os.path.dirname(__file__), "qbo_push")
+    qbo_push_path = os.path.join(os.path.dirname(__file__), "qbo_push.py")
     if not os.path.isfile(qbo_push_path):
         return
 
