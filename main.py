@@ -961,15 +961,19 @@ async def square_webhook(request: Request):
     if event_type == "order.updated":
         order = obj.get("order")
         if not isinstance(order, dict):
+            order = obj.get("order_updated")
+        if not isinstance(order, dict):
             return {"ok": True, "ignored": True}
 
-        order_id = order.get("id")
+        order_id = order.get("id") or order.get("order_id")
         if not order_id:
             return {"ok": True, "ignored": True}
 
         items: List[dict] = []
         order_full = None
-        if isinstance(order, dict):
+        order_keys = set(order.keys())
+        minimal_order_payload = order_keys.issubset({"id", "order_id"})
+        if isinstance(order, dict) and not minimal_order_payload:
             order_full = order
             items = _order_to_items(order)
 
