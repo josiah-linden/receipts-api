@@ -666,7 +666,7 @@ def _qbo_query(realm_id: str, query: str, access_token: str) -> dict:
         return {"error": True, "detail": str(e)}
 
 def _qbo_get_first_item_id(access_token: str, realm_id: str) -> Optional[str]:
-    data = _qbo_query(realm_id, "select Id, Name from Item maxresults 1", access_token)
+    data = _qbo_query(realm_id, "SELECT Id, Name FROM Item MAXRESULTS 1", access_token)
     items = (data.get("QueryResponse") or {}).get("Item") or []
     if items:
         return items[0].get("Id")
@@ -771,7 +771,7 @@ def _qbo_post_json(realm_id: str, path: str, access_token: str, payload: dict) -
 
 def _qbo_get_or_create_demo_item_id(realm_id: str, access_token: str) -> str:
     # 1) find existing “Receipt Item”
-    data = _qbo_query(realm_id, "select Id, Name from Item where Name = 'Receipt Item' maxresults 1", access_token)
+    data = _qbo_query(realm_id, "SELECT Id, Name FROM Item WHERE Name = 'Receipt Item' MAXRESULTS 1", access_token)
     if data.get("error"):
         raise RuntimeError(f"QBO query failed: {data}")
     items = (data.get("QueryResponse") or {}).get("Item") or []
@@ -779,7 +779,7 @@ def _qbo_get_or_create_demo_item_id(realm_id: str, access_token: str) -> str:
         return items[0]["Id"]
 
     # 2) find ANY Income account to attach item to
-    acct = _qbo_query(realm_id, "select Id, Name from Account where AccountType = 'Income' maxresults 1", access_token)
+    acct = _qbo_query(realm_id, "SELECT Id, Name FROM Account WHERE AccountType = 'Income' MAXRESULTS 1", access_token)
     if acct.get("error"):
         raise RuntimeError(f"QBO account lookup failed: {acct}")
     accts = (acct.get("QueryResponse") or {}).get("Account") or []
