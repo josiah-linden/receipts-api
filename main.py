@@ -649,15 +649,24 @@ def _qbo_query(realm_id: str, query: str, access_token: str) -> dict:
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
-        "Content-Type": "text/plain",
+        "Content-Type": "application/text",
     }
     req = urllib.request.Request(url, data=query.encode("utf-8"), headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = resp.read().decode("utf-8") or "{}"
-        return json.loads(raw)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8") or "{}"
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        try:
+            err = e.read().decode("utf-8")
+        except Exception:
+            err = str(e)
+        return {"error": True, "status": e.code, "detail": err}
+    except Exception as e:
+        return {"error": True, "detail": str(e)}
 
 def _qbo_get_first_item_id(access_token: str, realm_id: str) -> Optional[str]:
-    data = _qbo_query(realm_id, "select Id, Name from Item maxresults 1", access_token)
+    data = _qbo_query(realm_id, "SELECT Id, Name FROM Item MAXRESULTS 1", access_token)
     items = (data.get("QueryResponse") or {}).get("Item") or []
     if items:
         return items[0].get("Id")
@@ -762,13 +771,17 @@ def _qbo_post_json(realm_id: str, path: str, access_token: str, payload: dict) -
 
 def _qbo_get_or_create_demo_item_id(realm_id: str, access_token: str) -> str:
     # 1) find existing “Receipt Item”
-    data = _qbo_query(realm_id, "select Id, Name from Item where Name = 'Receipt Item' maxresults 1", access_token)
+    data = _qbo_query(realm_id, "SELECT Id, Name FROM Item WHERE Name = 'Receipt Item' MAXRESULTS 1", access_token)
+    if data.get("error"):
+        raise RuntimeError(f"QBO query failed: {data}")
     items = (data.get("QueryResponse") or {}).get("Item") or []
     if items:
         return items[0]["Id"]
 
     # 2) find ANY Income account to attach item to
-    acct = _qbo_query(realm_id, "select Id, Name from Account where AccountType = 'Income' maxresults 1", access_token)
+    acct = _qbo_query(realm_id, "SELECT Id, Name FROM Account WHERE AccountType = 'Income' MAXRESULTS 1", access_token)
+    if acct.get("error"):
+        raise RuntimeError(f"QBO account lookup failed: {acct}")
     accts = (acct.get("QueryResponse") or {}).get("Account") or []
     if not accts:
         raise Exception("No Income account found in QBO (sandbox). Create one Income account first.")
@@ -797,7 +810,11 @@ def qbo_push_tx(tx: dict) -> dict:
     if not access_token:
         return {"ok": False, "detail": "Missing access_token (run exchange)"}
 
-    item_id = _qbo_get_or_create_demo_item_id(realm_id, access_token)
+    try:
+        item_id = _qbo_get_or_create_demo_item_id(realm_id, access_token)
+    except Exception as exc:
+        detail = str(exc) or "QBO item lookup/create failed"
+        return {"ok": False, "detail": detail}
 
     lines = []
     for it in tx["items"]:
@@ -823,7 +840,7 @@ def qbo_push_tx(tx: dict) -> dict:
     return _qbo_post_json(realm_id, f"/v3/company/{realm_id}/salesreceipt?minorversion=65", access_token, payload)
 
 def _register_qbo_push_demo_routes() -> None:
-    qbo_push_path = os.path.join(os.path.dirname(__file__), "qbo_push")
+    qbo_push_path = os.path.join(os.path.dirname(__file__), "qbo_push.py")
     if not os.path.isfile(qbo_push_path):
         return
 
