@@ -20,6 +20,7 @@ app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 transactions: List[dict] = []
 processed_square_event_ids = set()
 qbo_tokens: Dict[str, dict] = {}
+square_oauth_tokens: Dict[str, dict] = {}
 # -------------------------
 # SQLite (demo spreadsheet)
 # -------------------------
@@ -56,6 +57,15 @@ def _db_init():
     conn.execute("""
     CREATE TABLE IF NOT EXISTS qbo_tokens (
       realm_id TEXT PRIMARY KEY,
+      access_token TEXT,
+      refresh_token TEXT,
+      expires_at INTEGER,
+      raw_json TEXT
+    )
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS square_tokens (
+      merchant_id TEXT PRIMARY KEY,
       access_token TEXT,
       refresh_token TEXT,
       expires_at INTEGER,
@@ -133,6 +143,74 @@ def _db_load_qbo_tokens() -> None:
     qbo_tokens = loaded
 
 _db_load_qbo_tokens()
+
+def _db_save_square_token(merchant_id: str, tok: dict) -> None:
+    if not merchant_id or not isinstance(tok, dict):
+        return
+
+    expires_at = tok.get("expires_at")
+    expires_in = tok.get("expires_in")
+    if expires_at is None and expires_in:
+        try:
+            expires_at = int(time.time()) + int(expires_in)
+        except (TypeError, ValueError):
+            expires_at = None
+
+    tok = dict(tok)
+    if expires_at is not None:
+        tok["expires_at"] = expires_at
+
+    conn = _db_conn()
+    conn.execute(
+        """
+        INSERT INTO square_tokens (merchant_id, access_token, refresh_token, expires_at, raw_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(merchant_id) DO UPDATE SET
+          access_token=excluded.access_token,
+          refresh_token=excluded.refresh_token,
+          expires_at=excluded.expires_at,
+          raw_json=excluded.raw_json
+        """,
+        (
+            str(merchant_id),
+            tok.get("access_token"),
+            tok.get("refresh_token"),
+            expires_at,
+            json.dumps(tok),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+def _db_load_square_tokens() -> None:
+    global square_oauth_tokens
+    conn = _db_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT merchant_id, access_token, refresh_token, expires_at, raw_json FROM square_tokens")
+    rows = cur.fetchall()
+    conn.close()
+
+    loaded: Dict[str, dict] = {}
+    for merchant_id, access_token, refresh_token, expires_at, raw_json in rows:
+        tok: Dict[str, object]
+        if raw_json:
+            try:
+                tok = json.loads(raw_json)
+            except json.JSONDecodeError:
+                tok = {}
+        else:
+            tok = {}
+        if access_token:
+            tok["access_token"] = access_token
+        if refresh_token:
+            tok["refresh_token"] = refresh_token
+        if expires_at is not None:
+            tok["expires_at"] = expires_at
+        loaded[str(merchant_id)] = tok
+
+    square_oauth_tokens = loaded
+
+_db_load_square_tokens()
 def _db_write_tx(tx: dict):
     """Upsert receipt line items into SQLite (demo-friendly, spreadsheet-like)."""
     if not isinstance(tx, dict):
@@ -218,8 +296,6 @@ def _db_load_square_tx_by_order_id(order_id: str) -> Optional[dict]:
             "square_order_id": order_id,
         },
     }
-
-square_oauth_tokens: Dict[str, dict] = {}
 
 # -------------------------
 # Helpers
@@ -486,6 +562,7 @@ async def square_callback(code: str):
 
     merchant_id = data.get("merchant_id") or "unknown"
     square_oauth_tokens[merchant_id] = data
+    _db_save_square_token(merchant_id, data)
 
     # TEMP shortcut: use merchant token for enrichment
     global SQUARE_ACCESS_TOKEN
