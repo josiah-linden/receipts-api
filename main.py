@@ -649,7 +649,7 @@ def _qbo_query(realm_id: str, query: str, access_token: str) -> dict:
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
-        "Content-Type": "text/plain",
+        "Content-Type": "application/text",
     }
     req = urllib.request.Request(url, data=query.encode("utf-8"), headers=headers, method="POST")
     try:
