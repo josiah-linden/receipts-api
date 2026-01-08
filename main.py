@@ -927,6 +927,10 @@ def _register_qbo_push_demo_routes() -> None:
 
 _register_qbo_push_demo_routes()
 
+from meta_audience import register_routes as register_meta_audience_routes
+
+register_meta_audience_routes(app, DB_PATH)
+
 @app.get("/api/quickbooks/status")
 async def quickbooks_status():
     realm_id = list(qbo_tokens.keys())[0] if qbo_tokens else None
