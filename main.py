@@ -1513,13 +1513,27 @@ async def demo_receipts(
             html += f"<div>Order ID: <span class='mono'>{esc(order_val)}</span></div>"
             html += "</div>"
             html += "<div class='items'>"
+            line_items_total = 0.0
             for item_row in items:
                 line_total = (item_row.get("quantity") or 0) * (item_row.get("unit_price") or 0)
+                line_items_total += float(line_total or 0)
                 html += "<div class='item'>"
                 html += "<div class='item-name'>"
                 html += f"<div>{esc(item_row['item_name'])}</div>"
                 if item_row.get("sku"):
                     html += f"<div class='sku mono'>{esc(item_row['sku'])}</div>"
+                html += "</div>"
+                html += "<div class='item-meta'>"
+                html += f"<div>{esc(item_row['quantity'])} × {esc(format_money(item_row['unit_price']))}</div>"
+                html += f"<div class='line-total'>{esc(currency)} {esc(format_money(line_total))}</div>"
+                html += "</div>"
+                html += "</div>"
+            diff_total = float(total or 0) - line_items_total
+            if abs(diff_total) >= 0.01:
+                html += "<div class='item'>"
+                html += "<div class='item-name'>Other charges (tax/fees)</div>"
+                html += "<div class='item-meta'>"
+                html += f"<div class='line-total'>{esc(currency)} {esc(format_money(diff_total))}</div>"
                 html += "</div>"
                 html += "<div class='item-meta'>"
                 html += f"<div>{esc(item_row['quantity'])} × {esc(format_money(item_row['unit_price']))}</div>"
