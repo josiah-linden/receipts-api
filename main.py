@@ -13,6 +13,7 @@ from typing import List, Optional, Dict
 from urllib.parse import urlencode
 import requests
 from requests.auth import HTTPBasicAuth
+from datetime import datetime
 
 app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 
@@ -1245,16 +1246,47 @@ async def demo_receipts(
     order_id: Optional[str] = None,
     item: Optional[str] = None,
     sku: Optional[str] = None,
-    start_ts: Optional[int] = None,
-    end_ts: Optional[int] = None,
-    min_total: Optional[float] = None,
-    max_total: Optional[float] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    min_total: Optional[str] = None,
+    max_total: Optional[str] = None,
 ):
     """
     Simple demo UI: shows receipts with filters and grouped line items.
     """
     where = ["user_id = ?"]
     params: List[object] = [user_id]
+
+    def parse_datetime_value(raw: Optional[str]) -> Optional[int]:
+        if raw is None:
+            return None
+        raw = str(raw).strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+            return int(parsed.timestamp())
+
+    def parse_float_value(raw: Optional[str]) -> Optional[float]:
+        if raw is None:
+            return None
+        raw = str(raw).strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    parsed_start_ts = parse_datetime_value(start_ts)
+    parsed_end_ts = parse_datetime_value(end_ts)
+    parsed_min_total = parse_float_value(min_total)
+    parsed_max_total = parse_float_value(max_total)
 
     if merchant:
         where.append("merchant = ?")
@@ -1271,18 +1303,18 @@ async def demo_receipts(
     if sku:
         where.append("sku LIKE ?")
         params.append(f"%{sku}%")
-    if start_ts is not None:
+    if parsed_start_ts is not None:
         where.append("ts >= ?")
-        params.append(int(start_ts))
-    if end_ts is not None:
+        params.append(int(parsed_start_ts))
+    if parsed_end_ts is not None:
         where.append("ts <= ?")
-        params.append(int(end_ts))
-    if min_total is not None:
+        params.append(int(parsed_end_ts))
+    if parsed_min_total is not None:
         where.append("total >= ?")
-        params.append(float(min_total))
-    if max_total is not None:
+        params.append(float(parsed_min_total))
+    if parsed_max_total is not None:
         where.append("total <= ?")
-        params.append(float(max_total))
+        params.append(float(parsed_max_total))
 
     where_clause = " AND ".join(where) if where else "1=1"
 
@@ -1310,6 +1342,17 @@ async def demo_receipts(
              .replace(">", "&gt;")
              .replace('"', "&quot;")
         )
+
+    def format_ts(ts_value: Optional[int]) -> str:
+        if not ts_value:
+            return ""
+        return datetime.fromtimestamp(int(ts_value)).strftime("%Y-%m-%d %H:%M:%S")
+
+    def format_money(amount: Optional[float]) -> str:
+        try:
+            return f"{float(amount):,.2f}"
+        except (TypeError, ValueError):
+            return "0.00"
 
     grouped: Dict[tuple, List[dict]] = {}
     for r in rows:
@@ -1386,8 +1429,13 @@ async def demo_receipts(
     .card{{background:#111114; border:1px solid #222; border-radius:12px; padding:14px;}}
     .row{{display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center;}}
     .meta{{font-size:12px; opacity:.8;}}
-    .items{{margin-top:10px; border-top:1px solid #1f1f24; padding-top:10px;}}
+    .items{{margin-top:10px; border-top:1px dashed #1f1f24; padding-top:10px;}}
     .item{{display:flex; justify-content:space-between; font-size:12px; padding:4px 0;}}
+    .item-name{{display:flex; flex-direction:column;}}
+    .sku{{opacity:.65; font-size:11px;}}
+    .item-meta{{text-align:right;}}
+    .line-total{{opacity:.75; font-size:11px;}}
+    .total-row{{display:flex; justify-content:space-between; margin-top:10px; padding-top:10px; border-top:1px solid #1f1f24; font-weight:600;}}
     .right{{text-align:right;}}
     .empty{{padding:24px; text-align:center; opacity:.75;}}
   </style>
@@ -1423,12 +1471,12 @@ async def demo_receipts(
           <input name="sku" value="{esc(sku)}" placeholder="sku" />
         </div>
         <div>
-          <label>Start (unix ts)</label>
-          <input name="start_ts" value="{esc(start_ts)}" placeholder="1700000000" />
+          <label>Start date/time</label>
+          <input type="datetime-local" name="start_ts" value="{esc(start_ts)}" />
         </div>
         <div>
-          <label>End (unix ts)</label>
-          <input name="end_ts" value="{esc(end_ts)}" placeholder="1709999999" />
+          <label>End date/time</label>
+          <input type="datetime-local" name="end_ts" value="{esc(end_ts)}" />
         </div>
         <div>
           <label>Min total</label>
@@ -1458,19 +1506,40 @@ async def demo_receipts(
             html += "<div class='card'>"
             html += "<div class='row'>"
             html += f"<span class='pill'>{esc(merchant_val)}</span>"
-            html += f"<span class='meta'>Total: <strong>{esc(currency)} {esc(total)}</strong></span>"
-            html += f"<span class='meta'>Timestamp: <span class='mono'>{esc(ts)}</span></span>"
+            html += f"<span class='meta'>Date: <span class='mono'>{esc(format_ts(ts))}</span></span>"
             html += "</div>"
             html += "<div class='row meta' style='margin-top:6px;'>"
             html += f"<div>Payment ID: <span class='mono'>{esc(payment_val)}</span></div>"
             html += f"<div>Order ID: <span class='mono'>{esc(order_val)}</span></div>"
             html += "</div>"
             html += "<div class='items'>"
+            line_items_total = 0.0
             for item_row in items:
+                line_total = (item_row.get("quantity") or 0) * (item_row.get("unit_price") or 0)
+                line_items_total += float(line_total or 0)
                 html += "<div class='item'>"
-                html += f"<div>{esc(item_row['item_name'])} <span class='mono'>{esc(item_row['sku'])}</span></div>"
-                html += f"<div class='right'>{esc(item_row['quantity'])} × {esc(item_row['unit_price'])}</div>"
+                html += "<div class='item-name'>"
+                html += f"<div>{esc(item_row['item_name'])}</div>"
+                if item_row.get("sku"):
+                    html += f"<div class='sku mono'>{esc(item_row['sku'])}</div>"
                 html += "</div>"
+                html += "<div class='item-meta'>"
+                html += f"<div>{esc(item_row['quantity'])} × {esc(format_money(item_row['unit_price']))}</div>"
+                html += f"<div class='line-total'>{esc(currency)} {esc(format_money(line_total))}</div>"
+                html += "</div>"
+                html += "</div>"
+            diff_total = float(total or 0) - line_items_total
+            if abs(diff_total) >= 0.01:
+                html += "<div class='item'>"
+                html += "<div class='item-name'>Other charges (tax/fees)</div>"
+                html += "<div class='item-meta'>"
+                html += f"<div class='line-total'>{esc(currency)} {esc(format_money(diff_total))}</div>"
+                html += "</div>"
+                html += "</div>"
+            html += "</div>"
+            html += "<div class='total-row'>"
+            html += "<div>Total</div>"
+            html += f"<div>{esc(currency)} {esc(format_money(total))}</div>"
             html += "</div>"
             html += "</div>"
 
