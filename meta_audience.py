@@ -2,6 +2,7 @@ import hashlib
 import os
 import sqlite3
 import time
+import uuid
 from typing import List, Optional
 
 import requests
@@ -119,6 +120,68 @@ def _add_users_to_custom_audience(
     return data
 
 
+def _seed_receipt_items(
+    db_path: str,
+    count: int,
+    merchant: str,
+    item: str,
+    days_ago: int,
+) -> int:
+    conn = _db_conn(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS receipt_items (
+          id TEXT PRIMARY KEY,
+          user_id TEXT,
+          merchant TEXT,
+          payment_id TEXT,
+          order_id TEXT,
+          sku TEXT,
+          item TEXT,
+          item_name TEXT,
+          quantity REAL,
+          unit_price REAL,
+          currency TEXT,
+          total REAL,
+          ts INTEGER
+        )
+        """
+    )
+    ts = int(time.time()) - int(days_ago) * 24 * 60 * 60
+    rows = []
+    for idx in range(1, count + 1):
+        rows.append(
+            (
+                str(uuid.uuid4()),
+                f"demo_user_{idx}",
+                merchant,
+                f"pay_{idx}",
+                f"order_{idx}",
+                f"sku_{idx}",
+                item,
+                item.title(),
+                1,
+                5.50,
+                "USD",
+                5.50,
+                ts,
+            )
+        )
+    cur.executemany(
+        """
+        INSERT INTO receipt_items
+          (id, user_id, merchant, payment_id, order_id, sku, item, item_name,
+           quantity, unit_price, currency, total, ts)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+    conn.close()
+    return len(rows)
+
+
 def register_routes(app: FastAPI, db_path: str) -> None:
     @app.post("/api/meta/audiences/custom")
     async def meta_custom_audience(
@@ -165,3 +228,25 @@ def register_routes(app: FastAPI, db_path: str) -> None:
             "audience": audience,
             "upload": upload,
         }
+
+    @app.post("/api/meta/audiences/seed")
+    async def meta_seed_audience(
+        count: int = 25,
+        merchant: str = "square",
+        item: str = "coffee",
+        days_ago: int = 9,
+    ):
+        if os.getenv("ALLOW_TEST_SEED", "").lower() != "true":
+            raise HTTPException(status_code=403, detail="Test seeding is disabled.")
+        if count <= 0:
+            raise HTTPException(status_code=400, detail="count must be positive.")
+        if days_ago < 0:
+            raise HTTPException(status_code=400, detail="days_ago must be >= 0.")
+        inserted = _seed_receipt_items(
+            db_path=db_path,
+            count=count,
+            merchant=merchant,
+            item=item,
+            days_ago=days_ago,
+        )
+        return {"ok": True, "inserted": inserted}
