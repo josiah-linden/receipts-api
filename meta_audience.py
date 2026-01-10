@@ -9,6 +9,7 @@ import requests
 from fastapi import HTTPException, FastAPI
 
 META_GRAPH_BASE = os.getenv("META_GRAPH_BASE", "https://graph.facebook.com/v18.0")
+META_TERMS_URL = "https://business.facebook.com/ads/manage/customaudiences/tos/"
 
 
 def _meta_access_token() -> str:
@@ -96,10 +97,7 @@ def _create_custom_audience(
         "customer_file_source": "USER_PROVIDED_ONLY",
     }
     response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=30)
-    data = response.json()
-    if response.status_code >= 400 or data.get("error"):
-        raise HTTPException(status_code=502, detail={"meta_error": data})
-    return data
+    return _handle_meta_response(response)
 
 
 def _add_users_to_custom_audience(
@@ -114,10 +112,41 @@ def _add_users_to_custom_audience(
         "data": hashed_ids,
     }
     response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=30)
-    data = response.json()
-    if response.status_code >= 400 or data.get("error"):
-        raise HTTPException(status_code=502, detail={"meta_error": data})
-    return data
+    return _handle_meta_response(response)
+
+
+def _handle_meta_response(response: requests.Response) -> dict:
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=502,
+            detail={"meta_error": {"message": "Non-JSON response from Meta."}},
+        )
+
+    if response.status_code < 400 and not data.get("error"):
+        return data
+
+    error = data.get("error", {})
+    error_code = error.get("code")
+    error_subcode = error.get("error_subcode")
+    hint = None
+
+    if error_code == 190 and error_subcode in {463, 467}:
+        hint = (
+            "Meta access token expired. Generate a new user/system token with "
+            "`ads_management` + `ads_read` and update META_ACCESS_TOKEN."
+        )
+    elif error_code == 200 and error_subcode == 1870090:
+        hint = (
+            "Custom Audience terms not accepted. Accept the terms for the ad account "
+            f"at {META_TERMS_URL}?act={_meta_ad_account_id()}."
+        )
+
+    detail = {"meta_error": data}
+    if hint:
+        detail["hint"] = hint
+    raise HTTPException(status_code=502, detail=detail)
 
 
 def _seed_receipt_items(
