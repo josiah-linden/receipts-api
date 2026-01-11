@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import sqlite3
 import time
@@ -111,7 +112,12 @@ def _add_users_to_custom_audience(
         "schema": ["EXTERN_ID"],
         "data": hashed_ids,
     }
-    response = requests.post(url, params={"access_token": access_token}, json=payload, timeout=30)
+    response = requests.post(
+        url,
+        params={"access_token": access_token},
+        data={"payload": json.dumps(payload)},
+        timeout=30,
+    )
     return _handle_meta_response(response)
 
 
