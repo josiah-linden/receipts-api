@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
+from google.cloud import bigquery
 
 app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 
@@ -28,6 +29,46 @@ square_oauth_tokens: Dict[str, dict] = {}
 # SQLite (demo spreadsheet)
 # -------------------------
 DB_PATH = os.getenv("DB_PATH") or "receipts.db"
+BQ_ENABLED = os.getenv("BQ_ENABLED", "").lower() in {"1", "true", "yes", "on"}
+BQ_PROJECT = os.getenv("BQ_PROJECT")
+BQ_TABLE = os.getenv("BQ_TABLE")
+_bq_client: Optional[bigquery.Client] = None
+
+def _get_bq_client() -> Optional[bigquery.Client]:
+    global _bq_client
+    if not BQ_ENABLED:
+        return None
+    if _bq_client:
+        return _bq_client
+    try:
+        _bq_client = bigquery.Client(project=BQ_PROJECT) if BQ_PROJECT else bigquery.Client()
+    except Exception as exc:
+        print("BigQuery client init failed:", exc)
+        _bq_client = None
+    return _bq_client
+
+def _bq_table_id() -> Optional[str]:
+    if not BQ_TABLE:
+        return None
+    return BQ_TABLE
+
+def _bq_insert_receipt_rows(rows: List[dict]) -> None:
+    if not rows:
+        return
+    client = _get_bq_client()
+    if not client:
+        return
+    table_id = _bq_table_id()
+    if not table_id:
+        print("BigQuery insert skipped: set BQ_TABLE to project.dataset.table")
+        return
+    try:
+        errors = client.insert_rows_json(table_id, rows)
+    except Exception as exc:
+        print("BigQuery insert failed:", exc)
+        return
+    if errors:
+        print("BigQuery insert errors:", errors)
 
 def _db_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -247,6 +288,7 @@ def _db_write_tx(tx: dict):
         (user_id, merchant, payment_id),
     )
 
+    bq_rows: List[dict] = []
     for i in items:
         sku = (i or {}).get("sku")
         name = (i or {}).get("name") or ""
@@ -254,17 +296,48 @@ def _db_write_tx(tx: dict):
         unit_price = (i or {}).get("unit_price") or 0
 
         row_id = str(uuid.uuid4())
+        row_payload = {
+            "id": row_id,
+            "user_id": user_id,
+            "merchant": merchant,
+            "payment_id": payment_id,
+            "order_id": order_id,
+            "sku": sku,
+            "item": name,
+            "item_name": name,
+            "quantity": float(qty),
+            "unit_price": float(unit_price),
+            "currency": currency,
+            "total": float(total),
+            "ts": int(ts),
+        }
         cur.execute(
             """
             INSERT INTO receipt_items
             (id, user_id, merchant, payment_id, order_id, sku, item, item_name, quantity, unit_price, currency, total, ts)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (row_id, user_id, merchant, payment_id, order_id, sku, name, name, float(qty), float(unit_price), currency, float(total), int(ts)),
+            (
+                row_payload["id"],
+                row_payload["user_id"],
+                row_payload["merchant"],
+                row_payload["payment_id"],
+                row_payload["order_id"],
+                row_payload["sku"],
+                row_payload["item"],
+                row_payload["item_name"],
+                row_payload["quantity"],
+                row_payload["unit_price"],
+                row_payload["currency"],
+                row_payload["total"],
+                row_payload["ts"],
+            ),
         )
+        bq_rows.append(row_payload)
 
     conn.commit()
     conn.close()
+    _bq_insert_receipt_rows(bq_rows)
 
 def _db_load_square_tx_by_order_id(order_id: str) -> Optional[dict]:
     if not order_id:
