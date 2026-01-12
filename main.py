@@ -15,6 +15,7 @@ import importlib
 import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
+from google.cloud import bigquery
 
 app = FastAPI(title="Receipts Ingestion API (Stripe + Square)")
 
