@@ -11,6 +11,7 @@ import urllib.request
 import sqlite3
 from typing import List, Optional, Dict
 from urllib.parse import urlencode
+import importlib
 import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
@@ -32,19 +33,19 @@ DB_PATH = os.getenv("DB_PATH") or "receipts.db"
 BQ_ENABLED = os.getenv("BQ_ENABLED", "").lower() in {"1", "true", "yes", "on"}
 BQ_PROJECT = os.getenv("BQ_PROJECT")
 BQ_TABLE = os.getenv("BQ_TABLE")
-_bq_client: Optional[bigquery.Client] = None
+_bq_client: Optional[object] = None
 
-def _get_bq_client() -> Optional[bigquery.Client]:
+def _get_bq_client() -> Optional[object]:
     global _bq_client
     if not BQ_ENABLED:
         return None
     if _bq_client:
         return _bq_client
-    try:
-        _bq_client = bigquery.Client(project=BQ_PROJECT) if BQ_PROJECT else bigquery.Client()
-    except Exception as exc:
-        print("BigQuery client init failed:", exc)
-        _bq_client = None
+    if importlib.util.find_spec("google.cloud.bigquery") is None:
+        print("BigQuery insert skipped: google-cloud-bigquery not installed")
+        return None
+    bq_module = importlib.import_module("google.cloud.bigquery")
+    _bq_client = bq_module.Client(project=BQ_PROJECT) if BQ_PROJECT else bq_module.Client()
     return _bq_client
 
 def _bq_table_id() -> Optional[str]:
